@@ -1,0 +1,16 @@
+{
+  "template": "video-previews",
+  "collection": "Patreon 2026 Oct 17 free",
+  "videos": [
+    "~/Videos/2026-10/01_intro.mp4",
+    "~/Videos/2026-10/02_studio_tour.mov"
+  ],
+  "post": {
+    "title": "October 2026: free videos",
+    "text": "This month's free videos:",
+    "access": "public",
+    "collection": "Free",
+    "publishNow": false
+  },
+  "publish": ["patreon_browser"]
+}

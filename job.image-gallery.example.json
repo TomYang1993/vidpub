@@ -1,0 +1,13 @@
+{
+  "template": "image-gallery",
+  "images": ["~/Pictures/2026-10/01.jpg", "~/Pictures/2026-10/02.png"],
+  "post": {
+    "title": "October 2026: behind the scenes",
+    "text": "A few shots from this month.",
+    "thumbnail": "~/Pictures/2026-10/cover.jpg",
+    "access": ["Gold", "Platinum"],
+    "collection": "Behind the Scenes",
+    "attachments": ["~/Pictures/2026-10/notes.pdf"]
+  },
+  "publish": ["patreon_browser"]
+}

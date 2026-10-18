@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
-import { contentHtml, renderContent, type Video } from "./publishers.ts";
-import { MAX_ATTEMPTS, loadJob, run } from "./vidpub.ts";
+import { TEMPLATES, contentHtml, type PostDoc } from "./publishers.ts";
+import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "vidpub-"));
 const noSleep = async () => {};
@@ -59,8 +59,8 @@ class FakeBunny {
 }
 
 function recorder() {
-  const calls: Video[][] = [];
-  return { calls, publishers: { patreon_manual: (_post: unknown, videos: Video[]) => (calls.push(videos), "posted") } };
+  const calls: PostDoc[] = [];
+  return { calls, publishers: { patreon_manual: (doc: PostDoc) => (calls.push(doc), "posted") } };
 }
 
 test("TUS upload resumes from the server's offset after a dropped connection", async () => {
@@ -90,9 +90,10 @@ test("TUS upload resumes from the server's offset after a dropped connection", a
 
 test("job: failed encode is replaced, publish runs once, rerun is a no-op", async () => {
   const path = job("ok", ["b.mp4", "a.mp4", "notes.pdf"], {
+    template: "video-previews",
     collection: "Oct",
     videos: ["b.mp4", "a.mp4"],
-    post: { title: "Oct", attachments: ["notes.pdf"] },
+    post: { title: "Oct", text: "Free:", access: "public", attachments: ["notes.pdf"] },
   });
   const fake = new FakeBunny({ a: [4], b: [5, 4] }); // b fails encoding once
   const rec = recorder();
@@ -100,7 +101,12 @@ test("job: failed encode is replaced, publish runs once, rerun is a no-op", asyn
   assert.deepEqual(fake.created.map((c) => c.guid), ["b-1", "a-2", "b-3"]);
   assert.ok(fake.created.every((c) => c.collectionId === "col:Oct"));
   assert.ok(!fake.videos.has("b-1"));
-  assert.deepEqual(rec.calls, [[{ title: "b", url: "https://play/b-3", preview: "https://cdn/b-3/preview.webp" }, { title: "a", url: "https://play/a-2", preview: "https://cdn/a-2/preview.webp" }]]);
+  assert.deepEqual(rec.calls[0].blocks, [
+    { text: "Free:" },
+    { image: "https://cdn/b-3/preview.webp" }, { link: "https://play/b-3" },
+    { image: "https://cdn/a-2/preview.webp" }, { link: "https://play/a-2" },
+  ]);
+  assert.deepEqual(rec.calls[0].attachments, [join(tmp, "ok", "notes.pdf")]);
 
   await run(loadJob(path, rec.publishers), fake, { sleep: noSleep, publishers: rec.publishers });
   assert.equal(fake.created.length, 3);
@@ -108,7 +114,7 @@ test("job: failed encode is replaced, publish runs once, rerun is a no-op", asyn
 });
 
 test("gives up after MAX_ATTEMPTS and publishes nothing", async () => {
-  const path = job("bad", ["c.mp4"], { videos: ["c.mp4"], post: { title: "t" } });
+  const path = job("bad", ["c.mp4"], { template: "video-previews", videos: ["c.mp4"], post: { title: "t", access: "public" } });
   const fake = new FakeBunny({ c: Array(MAX_ATTEMPTS).fill(5) });
   const rec = recorder();
   await assert.rejects(run(loadJob(path, rec.publishers), fake, { sleep: noSleep, publishers: rec.publishers }), /c\.mp4: gave up/);
@@ -126,18 +132,45 @@ test("single video: no collection, no post", async () => {
 test("bad job lists every problem before uploading anything", () => {
   const path = job("typos", ["a.mp4"], { videos: ["a.mp4", "gone.mp4", "a.mp4", "readme.txt"], post: { thumbnail: "x.jpg" }, publish: ["nope"] });
   assert.throws(() => loadJob(path), (e: Error) =>
-    ["listed twice", "missing: " + join(tmp, "typos", "gone.mp4"), "not a video", "post.title", "x.jpg", "unknown publisher: nope"]
+    ["listed twice", "missing: " + join(tmp, "typos", "gone.mp4"), "not a video", "post.title", "post.access", "needs a \"template\"", "x.jpg", "unknown publisher: nope"]
       .every((s) => e.message.includes(s)));
 });
 
-test("post content: {previews} is each preview, then its play URL", () => {
-  const videos = [{ title: "a", url: "u1", preview: "p1" }, { title: "b", url: "u2", preview: "p2" }];
-  assert.equal(renderContent({ title: "t", content: "Free:\n\n{previews}" }, videos), "Free:\n\np1\nu1\n\np2\nu2");
+test("image-gallery: image-only job never touches Bunny", async () => {
+  const path = job("gallery", ["a.jpg", "b.png"], {
+    template: "image-gallery", images: ["a.jpg", "b.png"], post: { title: "Pics", text: "On top", access: "public" },
+  });
+  const rec = recorder();
+  assert.deepEqual(await run(loadJob(path, rec.publishers), undefined, { publishers: rec.publishers }), []);
+  assert.deepEqual(rec.calls[0].blocks, [{ text: "On top" }, { image: join(tmp, "gallery", "a.jpg") }, { image: join(tmp, "gallery", "b.png") }]);
 });
 
-test("post content: {links} placeholder, $ in titles kept", () => {
-  const content = renderContent({ title: "t", content: "\nHi\n\n{links}\n" }, [{ title: "a $& b", url: "u1" }, { title: "c", url: "u2" }]);
-  assert.equal(content, "Hi\n\n1. a $& b: u1\n2. c: u2");
+test("templates: video-previews without text, image-gallery", () => {
+  const videos = [{ title: "a", url: "u1", preview: "p1" }, { title: "b", url: "u2" }];
+  assert.deepEqual(TEMPLATES["video-previews"].build(undefined, { videos }), [{ image: "p1" }, { link: "u1" }, { link: "u2" }]);
+  assert.deepEqual(TEMPLATES["image-gallery"].build("  Hi \n", { images: ["/x.jpg"] }), [{ text: "Hi" }, { image: "/x.jpg" }]);
+});
+
+test("post doc is the source of truth: hand edits kept, never overwritten or sent stale", async () => {
+  const spec = (text: string) => ({ template: "image-gallery", images: ["a.jpg"], post: { title: "T", text, access: "public" }, publish: [] });
+  const path = job("truth", ["a.jpg"], spec("one"));
+  const j = () => loadJob(path);
+  assert.deepEqual(buildPost(j(), []).blocks[0], { text: "one" });
+  writeFileSync(path, JSON.stringify(spec("two"))); // job changed, doc untouched: rebuild
+  assert.deepEqual(buildPost(j(), []).blocks[0], { text: "two" });
+  savePost(j(), { ...buildPost(j(), []), title: "edited" }); // hand edit: kept while the job stays the same
+  assert.equal(buildPost(j(), []).title, "edited");
+  writeFileSync(path, JSON.stringify({ ...spec("three"), publish: ["patreon_manual"] })); // job changed after a hand edit
+  assert.throws(() => buildPost(j(), []), /edited by hand/);
+  await assert.rejects(publishPost(j(), recorder().publishers), /job changed/);
+});
+
+test("old post.content fails with the template to use instead", () => {
+  const path = job("old", ["a.mp4"], { videos: ["a.mp4"], post: { title: "t", access: "public", content: "Hi\n\n{previews}" } });
+  assert.throws(() => loadJob(path), /"template": "video-previews" and "post": \{ "text": "Hi" \}/);
+});
+
+test("post HTML: escaped, URLs linked", () => {
   assert.equal(contentHtml('<b> & "x"\nhttps://p.net/a?b=1&c=2'),
     '<p>&#60;b&#62; &#38; &#34;x&#34;</p><p><a href="https://p.net/a?b=1&#38;c=2">https://p.net/a?b=1&#38;c=2</a></p>');
 });

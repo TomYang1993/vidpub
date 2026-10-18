@@ -1,44 +1,62 @@
-// Publishers: where a finished job gets announced.
-//
-// A publisher is (post, videos, jobPath) => string | Promise<string>. It runs once per job, after every
-// video is playable; the returned string (a URL or path) is saved in the job state so reruns skip it.
-// Add an integration = add a function + a PUBLISHERS entry.
+// Templates turn a job's text plus its videos or images into a PostDoc, saved as <job>.post.json. That doc is
+// the one thing publishers send. A publisher is (doc, jobPath) => string | Promise<string>; it runs once per job
+// and the returned string (a URL or path) is saved in the job state so reruns skip it.
+// Add an integration = add a function + a PUBLISHERS entry. Add a layout = add a TEMPLATES entry.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { BrowserContext, Locator } from "playwright";
 
-export type Post = {
+export type Block = { text: string } | { image: string } | { link: string }; // image: https URL or absolute file path
+export type PostDoc = {
   title: string;
-  content?: string; // {links}: one numbered line per video. {previews}: per video, its preview image then its play URL
-  thumbnail?: string; // image path
-  access?: string | string[]; // "public" | "patrons" | "paid" | list of tier names
+  access: string | string[]; // "public" | "patrons" | "paid" | list of tier names
   collection?: string; // Patreon collection (not the Bunny one)
+  thumbnail?: string; // image path
   attachments?: string[]; // file paths
   publishNow?: boolean; // patreon_browser: publish right away instead of leaving a draft to review
+  blocks: Block[];
 };
 export type Video = { title: string; url: string; preview?: string }; // preview: animated WebP
-export type Publisher = (post: Post, videos: Video[], jobPath: string) => string | Promise<string>;
+export type Template = {
+  label: string;
+  needs: "videos" | "images";
+  build(text: string | undefined, items: { videos?: Video[]; images?: string[] }): Block[];
+};
+export type Publisher = (doc: PostDoc, jobPath: string) => string | Promise<string>;
 
-export function renderContent(post: Post, videos: Video[]) {
-  const links = videos.map((v, i) => `${i + 1}. ${v.title}: ${v.url}`).join("\n");
-  const previews = videos.map((v) => [v.preview, v.url].filter(Boolean).join("\n")).join("\n\n");
-  return (post.content ?? "{links}").trim()
-    .replaceAll("{links}", () => links) // fn: keeps "$" in titles literal
-    .replaceAll("{previews}", () => previews);
-}
+const textBlocks = (text?: string): Block[] => (text?.trim() ? [{ text: text.trim() }] : []);
+export const TEMPLATES: Record<string, Template> = {
+  "video-previews": {
+    label: "Video previews: text, then each video's animated preview with its play link",
+    needs: "videos",
+    build: (text, { videos = [] }) => [
+      ...textBlocks(text),
+      ...videos.flatMap((v): Block[] => [...(v.preview ? [{ image: v.preview }] : []), { link: v.url }]),
+    ],
+  },
+  "image-gallery": {
+    label: "Image gallery: text, then the images, uploaded",
+    needs: "images",
+    build: (text, { images = [] }) => [...textBlocks(text), ...images.map((image) => ({ image }))],
+  },
+};
+
+const isUrl = (s: string) => /^https?:\/\//.test(s);
 
 // ponytail: Patreon's API can't create posts (v2 is read-only for posts), so this writes the content
 // to the clipboard plus a checklist for the rest. patreon_browser does all of it, but unofficially.
-export function patreonManual(post: Post, videos: Video[], jobPath: string) {
-  const content = renderContent(post, videos);
+export function patreonManual(doc: PostDoc, jobPath: string) {
+  const content = doc.blocks
+    .map((b) => ("text" in b ? b.text : "link" in b ? b.link : isUrl(b.image) ? b.image : `Insert image: ${b.image}`))
+    .join("\n\n");
   const checklist = [
-    `Title: ${post.title}`,
-    post.thumbnail && `Thumbnail: ${post.thumbnail}`,
-    `Access: ${[post.access ?? "(not set)"].flat().join(", ")}`,
-    post.collection && `Collection: ${post.collection}`,
-    ...(post.attachments ?? []).map((a) => `Attach: ${a}`),
+    `Title: ${doc.title}`,
+    doc.thumbnail && `Thumbnail: ${doc.thumbnail}`,
+    `Access: ${[doc.access].flat().join(", ")}`,
+    doc.collection && `Collection: ${doc.collection}`,
+    ...(doc.attachments ?? []).map((a) => `Attach: ${a}`),
   ].filter(Boolean).join("\n");
   const out = `${jobPath}.patreon.txt`;
   writeFileSync(out, `${checklist}\n\n${content}\n`);
@@ -74,8 +92,8 @@ export function contentHtml(text: string) {
 // patreon-login.ts. Unofficial: it breaks when Patreon changes the editor. Selectors were calibrated in Oct 2026
 // and all live in `S`. Headed on purpose: Cloudflare blocks headless Chrome. Every field is checked before
 // Publish is touched; a failure leaves an unpublished draft plus <job>.patreon-error.png.
-export async function patreonBrowser(post: Post, videos: Video[], jobPath: string) {
-  if (!post.access) throw new Error("patreon_browser needs post.access, so links never go out public by accident");
+export async function patreonBrowser(doc: PostDoc, jobPath: string) {
+  if (!doc.access) throw new Error("patreon_browser needs doc.access, so links never go out public by accident");
   const ctx = await openPatreonProfile(false);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   const S = {
@@ -84,6 +102,7 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
     imagePost: page.getByRole("button", { name: "Image", exact: true }), // thumbnail = image post's cover
     imageBlock: page.getByRole("menuitem", { name: "Image", exact: true }), // inline image, under "Click to add below"
     imageUrl: page.getByPlaceholder("Type or paste image URL"), // by URL keeps a WebP animated; a file upload doesn't
+    imageFile: page.getByRole("button", { name: "Select image file" }),
     imageConfirm: page.getByRole("button", { name: "Confirm", exact: true }),
     browse: page.getByRole("button", { name: "Browse", exact: true }),
     thumbnailUploaded: page.getByRole("button", { name: "Add image" }),
@@ -134,19 +153,20 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
     await page.goto("https://www.patreon.com/posts/new");
     await page.waitForURL(/\/posts\/[^/]*?\d+\/edit/);
 
-    if (post.thumbnail) {
+    if (doc.thumbnail) {
       await S.imagePost.click();
       const chooser = page.waitForEvent("filechooser");
       await S.browse.click();
-      await (await chooser).setFiles(post.thumbnail);
+      await (await chooser).setFiles(doc.thumbnail);
       await S.thumbnailUploaded.waitFor({ timeout: 300_000 });
     }
 
-    await S.title.fill(post.title);
-    const text = renderContent(post, videos);
-    // Preview lines go in as markers; each marker gets its image inserted below it, then the marker is removed.
-    const images = videos.flatMap((v) => (v.preview && text.includes(v.preview) ? [v.preview] : []));
-    const marked = images.reduce((t, url, i) => t.replaceAll(url, `vidpub-image-${i}`), text);
+    await S.title.fill(doc.title);
+    // Paragraphs and links are pasted in one go, with a marker line where each image goes. Each marker then
+    // gets its image inserted below it and is removed.
+    const images = doc.blocks.flatMap((b) => ("image" in b ? [b.image] : []));
+    let n = 0;
+    const marked = doc.blocks.map((b) => ("text" in b ? b.text : "link" in b ? b.link : `vidpub-image-${n++}`)).join("\n");
     await S.content.click();
     await S.content.evaluate((el, { text, html }) => { // paste HTML so links stay links
       const data = new DataTransfer();
@@ -154,33 +174,44 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
       data.setData("text/html", html);
       el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
     }, { text: marked, html: contentHtml(marked) });
-    for (const [i, url] of images.entries()) {
+    for (const [i, image] of images.entries()) {
       const marker = S.content.getByText(`vidpub-image-${i}`, { exact: true });
+      const count = await S.content.locator("img").count();
       await marker.click();
       await S.addBlock.click();
       await S.imageBlock.click();
-      await S.imageUrl.fill(url);
-      await S.imageConfirm.click();
-      await S.content.locator(`img[src="${url}"]`).waitFor();
+      if (isUrl(image)) {
+        await S.imageUrl.fill(image); // by URL keeps an animated WebP animated
+      } else {
+        const chooser = page.waitForEvent("filechooser");
+        await S.imageFile.click();
+        await (await chooser).setFiles(image);
+      }
+      await S.imageConfirm.click({ timeout: 10_000 }).catch(() => {}); // a file may insert without it
+      await S.content.locator("img").nth(count).waitFor({ timeout: 300_000 });
       await marker.click({ clickCount: 3 });
       await page.keyboard.press("Backspace"); // clear the marker text...
       await page.keyboard.press("Backspace"); // ...and its now-empty paragraph
     }
-    if ((await S.title.inputValue()) !== post.title) fail("title didn't stick");
-    const want = text.match(/https?:\/\/[^\s<]+/g) ?? []; // every image and link, in order
-    const got = await S.content.evaluate((el) => [...el.querySelectorAll("img[src], a[href]")].map((n) => n.getAttribute("src") ?? n.getAttribute("href")));
-    if (want.join("\n") !== got.join("\n")) fail(`content came out wrong: expected ${want.join(" ")} but got ${got.join(" ")}`);
+    if ((await S.title.inputValue()) !== doc.title) fail("title didn't stick");
+    const want = doc.blocks.flatMap((b) => // every image and link, in order; uploaded files get Patreon URLs
+      "image" in b ? [`img ${isUrl(b.image) ? b.image : "(upload)"}`]
+        : "link" in b ? [`a ${b.link}`] : (b.text.match(/https?:\/\/[^\s<]+/g) ?? []).map((u) => `a ${u}`));
+    const got = await S.content.evaluate((el) =>
+      [...el.querySelectorAll("img[src], a[href]")].map((n) => (n.tagName === "IMG" ? `img ${n.getAttribute("src")}` : `a ${n.getAttribute("href")}`)));
+    const same = want.length === got.length && want.every((w, i) => w === got[i] || (w === "img (upload)" && got[i].startsWith("img ")));
+    if (!same) fail(`content came out wrong: expected ${want.join(", ")} but got ${got.join(", ")}`);
     if ((await S.content.innerText()).includes("vidpub-image-")) fail("an image marker was left in the content");
 
-    if (post.attachments?.length) {
+    if (doc.attachments?.length) {
       await S.addBlock.click();
       const chooser = page.waitForEvent("filechooser");
       await S.attachmentsBlock.click();
-      await (await chooser).setFiles(post.attachments);
-      for (const a of post.attachments) await S.attachment(basename(a)).waitFor({ timeout: 1_800_000 });
+      await (await chooser).setFiles(doc.attachments);
+      for (const a of doc.attachments) await S.attachment(basename(a)).waitFor({ timeout: 1_800_000 });
     }
 
-    const access = post.access;
+    const access = doc.access;
     if (access === "public" || access === "patrons") {
       await S.free.click();
       await S.freeMore.click();
@@ -193,17 +224,17 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
       if (!(await S.paidMembers.isChecked())) await S.paidMembers.click();
       if (access === "paid") await setMenu(S.tiers, "tier", (all) => all, true);
       else if (Array.isArray(access)) await setMenu(S.tiers, "tier", () => access, true);
-      else fail(`post.access must be "public", "patrons", "paid" or a list of tiers, not ${JSON.stringify(access)}`);
+      else fail(`doc.access must be "public", "patrons", "paid" or a list of tiers, not ${JSON.stringify(access)}`);
     }
     if (!(await (access === "public" || access === "patrons" ? S.free : S.paid).isChecked())) fail("access didn't stick");
 
-    if (post.collection) await setMenu(S.collections, "collection", () => [post.collection!], false);
+    if (doc.collection) await setMenu(S.collections, "collection", () => [doc.collection!], false);
 
     await page.waitForTimeout(2000); // let the autosave start, then wait for it to finish
     await S.saving.waitFor({ state: "hidden", timeout: 120_000 });
     await S.saved.waitFor();
     const id = page.url().match(/(\d+)\/edit/)![1];
-    if (!post.publishNow) {
+    if (!doc.publishNow) {
       console.log(`Patreon draft saved: ${page.url()} (review, then publish)`);
       return page.url();
     }

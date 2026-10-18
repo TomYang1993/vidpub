@@ -1,40 +1,53 @@
 # vidpub
 
-Videos → Bunny Stream (optionally into a collection) → Patreon post with the links. Plain TypeScript and
+Videos → Bunny Stream (optionally into a collection) → Patreon post built from a template. Plain TypeScript and
 API calls on Node 24, run on your Mac. No server, no build step, no AI agents, no extra cost beyond Bunny.
 
 ```
-job.json ──► validate everything (files exist, publishers known) before uploading
-         ──► find/create Bunny collection (if set)
-         ──► per video: create video → resumable TUS upload (64 MB chunks)
-         ──► poll every 30s until every video is encoded
+job.json ──► validate everything (files exist, template + publishers known) before uploading
+         ──► videos only: find/create Bunny collection, then per video:
+               create → resumable TUS upload (64 MB chunks) → poll every 30s until encoded
                failed / stuck → delete + re-upload (3 tries per run)
-         ──► publishers (once): patreon_manual  → content on clipboard + checklist
-                                patreon_browser → Patreon draft (or post) via Chrome
+         ──► template builds the post → <job>.post.json  (the source of truth; edit it to change the post)
+         ──► publishers (once) send exactly that file:
+               patreon_manual  → content on clipboard + checklist
+               patreon_browser → Patreon draft (or post) via Chrome
 ```
 
 ## Setup
 
 ```bash
 npm install            # playwright (patreon_browser only), plus typescript + node types for typecheck
-cp .env.example .env   # fill in BUNNY_LIBRARY_ID + BUNNY_API_KEY
+cp .env.example .env   # fill in BUNNY_LIBRARY_ID + BUNNY_API_KEY (not needed for image-only jobs)
 ```
 
 ## Use
 
-A batch is a job file, see [job.example.json](job.example.json). Paths are relative to the job file, and `~/` works.
+A batch is a job file. Paths are relative to the job file, and `~/` works. Pick a template:
+
+| Template | Post body | Example |
+|---|---|---|
+| `video-previews` | `post.text`, then per video its animated preview (Bunny's WebP) with its play link below | [job.video-previews.example.json](job.video-previews.example.json) |
+| `image-gallery` | `post.text`, then the `images`, uploaded to Patreon. No Bunny involved | [job.image-gallery.example.json](job.image-gallery.example.json) |
 
 | Field | |
 |---|---|
-| `videos` | required; uploaded and linked in this order; title = file name without extension |
+| `template` | required when there's a post |
+| `videos` | for `video-previews`; uploaded and shown in this order |
+| `images` | for `image-gallery`; shown in this order |
 | `collection` | Bunny collection; omit to upload outside any collection |
-| `post.title` | required when there's a post |
-| `post.content` | `{links}` becomes one numbered line per video; `{previews}` becomes, per video, its animated preview (Bunny's WebP) then its play URL; default is just the links |
+| `post.title`, `post.access` | required. Access: `"public"`, `"patrons"`, `"paid"` or a list of tier names |
+| `post.text` | paragraph(s) on top; URLs become links |
 | `post.thumbnail`, `post.attachments` | file paths |
-| `post.access` | `"public"`, `"patrons"`, `"paid"` or a list of tier names |
 | `post.collection` | Patreon collection (not the Bunny one) |
 | `post.publishNow` | `patreon_browser` only: `true` publishes, default leaves a draft to review |
 | `publish` | `patreon_manual` and/or `patreon_browser`; default `["patreon_manual"]` when there's a post |
+
+**The post file is the source of truth.** The template writes `<job>.post.json`: the post settings plus a list of
+blocks (`{ "text" }`, `{ "image" }` as a URL or file path, `{ "link" }`). Publishers send exactly that. Edit it by
+hand to change the post; reruns keep your edits. If you change the job after hand-editing the post file, the run
+stops rather than overwrite your edits or send a stale post: delete the post file to rebuild it, or undo the change.
+Jobs from before templates (`post.content` with `{links}`/`{previews}`) fail with the equivalent to use instead.
 
 ```bash
 caffeinate -i node vidpub.ts ~/Videos/2026-10/job.json   # caffeinate keeps the Mac awake
@@ -54,7 +67,7 @@ publishers work around that:
 - **`patreon_manual`** copies the content to your clipboard and writes `<job>.patreon.txt`: the content plus a
   checklist (title, thumbnail, access, collection, attachments) to apply in the editor yourself.
 - **`patreon_browser`** fills in Patreon's web editor for you: thumbnail (as the post's cover image), title,
-  content with clickable links (and `{previews}` as inline animated images), attachments, access, collection. It leaves a **draft** and prints its URL. Set
+  the blocks (text, links, images: URLs inserted by URL, files uploaded), attachments, access, collection. It leaves a **draft** and prints its URL. Set
   `post.publishNow: true` to publish instead. `post.access` is required, so links never go out public by
   accident.
 
