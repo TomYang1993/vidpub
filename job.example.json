@@ -1,0 +1,17 @@
+{
+  "collection": "October 2026",
+  "videos": [
+    "~/Videos/2026-10/01_intro.mp4",
+    "~/Videos/2026-10/02_studio_tour.mov"
+  ],
+  "post": {
+    "title": "October 2026: Behind the Scenes",
+    "content": "This month's videos:\n\n{links}",
+    "thumbnail": "~/Videos/2026-10/cover.jpg",
+    "access": ["Gold", "Platinum"],
+    "collection": "Behind the Scenes",
+    "attachments": ["~/Videos/2026-10/notes.pdf"],
+    "publishNow": false
+  },
+  "publish": ["patreon_browser"]
+}

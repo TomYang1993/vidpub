@@ -1,0 +1,19 @@
+{
+  "name": "vidpub",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test vidpub.test.ts",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "playwright": "1.64.1"
+  }
+}
