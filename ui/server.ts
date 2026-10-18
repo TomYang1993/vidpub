@@ -62,7 +62,8 @@ export function writeJob(dir: string, form: Form, publishers: Record<string, Pub
   if (post && !raw.publish?.length) problems.push("pick where to publish the post");
   const draft = join(dir, DRAFT);
   try {
-    writeFileSync(draft, `${JSON.stringify(raw, null, 2)}\n`);
+    rmSync(draft, { force: true }); // a symlink planted here would otherwise be written through
+    writeFileSync(draft, `${JSON.stringify(raw, null, 2)}\n`, { flag: "wx" });
     try {
       loadJob(draft, publishers);
     } catch (e) {
@@ -90,6 +91,23 @@ export function applyEdits(doc: PostDoc, edits: { title?: unknown; texts?: unkno
     })
     .filter((b) => !("text" in b) || b.text);
   return { ...doc, title: typeof edits.title === "string" && edits.title.trim() ? edits.title.trim() : doc.title, blocks };
+}
+
+/** Why a post can't be sent from `dir`: a malformed post file, or local files it would upload or read that aren't
+ *  inside `dir` once symlinks are resolved. The GUI only ever writes in-folder names, but a job.json or post file
+ *  that came with a downloaded folder could point anywhere. loadJob already types the job; the post file is raw JSON. */
+export function postProblems(dir: string, job: Job, doc: PostDoc): string[] {
+  const str = (x: unknown): x is string => typeof x === "string";
+  const shaped = Array.isArray(doc.blocks) && (doc.thumbnail === undefined || str(doc.thumbnail))
+    && (doc.attachments === undefined || (Array.isArray(doc.attachments) && doc.attachments.every(str)))
+    && doc.blocks.every((b: unknown) => !!b && typeof b === "object" && Object.keys(b).length === 1 && Object.values(b).every(str));
+  if (!shaped) return ["the post file is malformed: rebuild it"]; // e.g. attachments: "/etc/hosts" would pass a per-entry check
+  const local = (p?: string) => (str(p) && !/^https?:\/\//.test(p) ? [p] : []);
+  return [
+    ...job.videos, ...job.images, ...local(job.post?.thumbnail), ...(job.post?.attachments ?? []),
+    ...local(doc.thumbnail), ...(doc.attachments ?? []), ...doc.blocks.flatMap((b) => ("image" in b ? local(b.image) : [])),
+  ].filter((p) => !(existsSync(p) ? realpathSync(p) : resolve(p)).startsWith(dir + sep))
+    .map((p) => `outside ${dir}: ${p}`);
 }
 
 /** The folder's files for the page, plus its job.json (if any) translated back into a Form. */
@@ -260,8 +278,10 @@ export function serve(opts: {
   /** Step 2: send <job>.post.json, exactly as saved, to the job's publishers. */
   function publish(dir: string) {
     if (live?.running) throw fail(409, "something is already running");
-    const job = loadJob(join(dir, "job.json"), publishers);
-    if (!existsSync(postPath(job))) throw fail(400, "no post yet: press Start first");
+    const { job, doc } = readPost(dir);
+    if (!job || !doc) throw fail(400, "no post yet: press Start first");
+    const problems = postProblems(dir, job, doc);
+    if (problems.length) throw fail(400, `Not sending:\n${problems.join("\n")}`);
     if (job.publish.includes("patreon_browser") && publishers === PUBLISHERS && !existsSync(PATREON_PROFILE)) {
       throw fail(400, "Log in to Patreon once first: run node patreon-login.ts in the vidpub folder, then send again.");
     }
