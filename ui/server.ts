@@ -106,8 +106,13 @@ export function postProblems(dir: string, job: Job, doc: PostDoc): string[] {
   return [
     ...job.videos, ...job.images, ...local(job.post?.thumbnail), ...(job.post?.attachments ?? []),
     ...local(doc.thumbnail), ...(doc.attachments ?? []), ...doc.blocks.flatMap((b) => ("image" in b ? local(b.image) : [])),
-  ].filter((p) => !(existsSync(p) ? realpathSync(p) : resolve(p)).startsWith(dir + sep))
-    .map((p) => `outside ${dir}: ${p}`);
+  ].flatMap((p) => {
+    try {
+      return realpathSync(p).startsWith(dir + sep) ? [] : [`outside ${dir}: ${p}`];
+    } catch {
+      return [`missing: ${p}`]; // incl. a dangling symlink, which could be pointed anywhere later
+    }
+  });
 }
 
 /** The folder's files for the page, plus its job.json (if any) translated back into a Form. */

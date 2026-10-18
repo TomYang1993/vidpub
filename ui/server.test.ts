@@ -48,6 +48,9 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
   const job = { path: join(dir, "job.json"), videos: [], images: [join(dir, "a.png")], publish: [], post: { title: "t", access: "public", attachments: [join(dir, "link.pdf")] } };
   const doc = { title: "t", access: "public", attachments: [elsewhere], blocks: [{ image: join(dir, "a.png") }, { image: "/etc/hosts" }, { image: "https://cdn/x.webp" }] };
   assert.deepEqual(postProblems(dir, job, doc), [join(dir, "link.pdf"), elsewhere, "/etc/hosts"].map((p) => `outside ${dir}: ${p}`));
+  symlinkSync(join(dir, "not-yet"), join(dir, "dangling.png"));
+  assert.deepEqual(postProblems(dir, { ...job, post: undefined }, { ...doc, attachments: [], blocks: [{ image: join(dir, "dangling.png") }] }),
+    [`missing: ${join(dir, "dangling.png")}`]);
   const sneaky = JSON.parse(JSON.stringify({ ...doc, attachments: "/etc/hosts", blocks: [] })); // raw JSON, any shape
   assert.deepEqual(postProblems(dir, { ...job, post: undefined }, sneaky), ["the post file is malformed: rebuild it"]);
 
