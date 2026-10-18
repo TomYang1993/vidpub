@@ -58,6 +58,39 @@ You get a macOS notification when it finishes or fails. **Rerun the same command
 in `<job>.state.json`, so finished videos are skipped, interrupted uploads resume from where they
 stopped, and failed ones are re-uploaded. Each run allows 3 fresh uploads per video before giving up.
 
+## GUI
+
+```bash
+caffeinate -i npm run ui   # opens http://127.0.0.1:<port>/?t=<token> in your browser
+```
+
+The same flow without writing `job.json` by hand, in two steps:
+
+1. Pick a folder (native macOS dialog; videos upload straight from it, nothing is copied), choose the post type,
+   tick and order the files (drag, or ↑ ↓), fill in the post, press Start. It writes `job.json` into that folder in
+   the format above, uploads the videos with live progress (upload %, encoding, re-uploads) and builds
+   `<job>.post.json`. Nothing is sent yet.
+2. The **post preview** shows that file block by block (text, preview images, links). Edit the title and text,
+   save, then **Send to Patreon**: the publishers send exactly that file and the draft link appears.
+
+`node vidpub.ts <folder>/job.json` reruns a GUI job, and a CLI-made `job.json` opens in the GUI. **Jobs** lists
+the jobs in folders you've picked, including ones built and waiting for review.
+**Settings** writes the Bunny library ID and API key to `.env` and checks them with Bunny; the key is never shown
+again.
+
+Uploads run in the terminal process, not the tab: close the tab anytime and reopen the URL the terminal printed.
+Ctrl+C stops it; Start again resumes like a CLI rerun. If you edited the preview and then change the job, Start
+stops rather than drop your edits, and offers to rebuild the post from the job.
+
+It only listens on 127.0.0.1, but any website you visit can send requests to localhost. So every request needs the
+random per-launch token from the opened URL, Host and Origin must be the server's own (blocks DNS rebinding and
+CSRF), and it only reads folders picked in the dialog (remembered in `~/.vidpub/ui.json`).
+
+**A double-click Mac app is not built.** It would take Electron: a main process that calls `serve()` from
+`ui/server.ts` and loads its URL in a window, `dialog.showOpenDialog` in place of osascript, Node and playwright
+bundled (Chrome stays the user's own), and electron-builder producing a signed, notarized `.app`, which needs an
+Apple Developer ID ($99/yr). Without signing, users have to get past Gatekeeper by hand.
+
 ## Patreon
 
 Patreon's official API (v2) **can't create posts, set tier access or add posts to collections**. Post
@@ -120,5 +153,5 @@ image. If your library blocks direct file access or limits allowed domains, make
 ## Check
 
 ```bash
-npm test && npm run typecheck   # no network: TUS resume, retry/replace, give-up, rerun, job validation
+npm test && npm run typecheck   # no network: TUS resume, retry/replace, give-up, rerun, job validation, GUI job writing + preview edits
 ```

@@ -1,5 +1,5 @@
 .env
-node_modules/
+node_modules
 .impeccable/
 # per-job output, in case a job file lives in this folder
 *.state.json

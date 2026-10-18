@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>vidpub</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f3; --card: #fff; --fg: #1c1c1a; --muted: #6d6c67; --line: #e2e1dc; --field: #fafaf8;
+    --accent: #d9480f; --accent-fg: #fff; --ok: #2b8a3e; --bad: #c92a2a; --track: #ebeae6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1e1e1c; --fg: #ecebe7; --muted: #9b9993; --line: #33332f; --field: #191918;
+      --accent: #ff7a33; --accent-fg: #1a0d05; --ok: #57c36a; --bad: #ff6b6b; --track: #2b2b28;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg); }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 28px; padding: 12px 24px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header b { font-size: 19px; letter-spacing: -0.01em; }
+  nav { display: flex; gap: 4px; }
+  nav button { border: 0; background: none; padding: 6px 12px; border-radius: 6px; color: var(--muted); }
+  nav button[aria-current="page"] { color: var(--fg); background: var(--track); font-weight: 600; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 96px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin: 0 0 14px; }
+  label { display: block; font-weight: 550; margin: 16px 0 5px; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
+  code { font: 0.9em ui-monospace, Menlo, monospace; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+  input[type="text"], input[type="password"], textarea, select {
+    width: 100%; font: inherit; padding: 8px 10px; color: var(--fg); background: var(--field);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  button { font: inherit; padding: 7px 14px; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; padding: 9px 22px; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  a { color: var(--accent); }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } header { gap: 12px; padding: 10px 16px; } }
+  .check { display: flex; gap: 9px; align-items: baseline; font-weight: 400; margin: 7px 0; }
+  .check input { flex: none; }
+  fieldset { border: 0; padding: 0; margin: 0; }
+  legend { font-weight: 550; margin: 16px 0 5px; padding: 0; }
+  [hidden] { display: none !important; }
+
+  #recent { width: auto; max-width: min(100%, 420px); }
+  #folder { margin: 10px 0 0; word-break: break-all; }
+  ul.items { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  ul.items:empty { display: none; }
+  ul.items li { display: grid; grid-template-columns: 18px 18px 26px 1fr auto auto; gap: 8px; align-items: center; padding: 6px 8px 6px 10px; background: var(--card); border-top: 1px solid var(--line); }
+  ul.items li:first-child { border-top: 0; }
+  ul.items li.off .name, ul.items li.off .pos { color: var(--muted); }
+  ul.items li.dragging { opacity: 0.35; }
+  .grip { cursor: grab; color: var(--muted); user-select: none; letter-spacing: -2px; }
+  .pos, .size { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+  .name { overflow-wrap: anywhere; }
+  .move button { padding: 0 7px; line-height: 22px; font-size: 12px; border-color: transparent; background: none; color: var(--muted); }
+  .move button:hover:not(:disabled) { border-color: var(--line); color: var(--fg); }
+  .tools { margin-top: 12px; }
+
+  .errors { color: var(--bad); white-space: pre-wrap; margin-top: 12px; }
+  .errors:empty { display: none; }
+  #run-state { font-weight: 600; }
+  #run-state.ok { color: var(--ok); } #run-state.bad { color: var(--bad); }
+  .vrow { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 120px; gap: 12px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+  .vrow:first-child { border-top: 0; }
+  .vrow .label { color: var(--muted); }
+  .vrow.ready .label { color: var(--ok); } .vrow.bad .label { color: var(--bad); }
+  .bar { height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); transform-origin: left; transform: scaleX(0); transition: transform 0.3s; }
+  .ready .bar i { background: var(--ok); }
+  .bad .bar i { background: var(--bad); }
+  .busy .bar i { opacity: 0.5; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.2; } }
+  @media (prefers-reduced-motion: reduce) { .busy .bar i { animation: none; } .bar i { transition: none; } }
+  .pubs { margin-top: 14px; }
+  .pub { padding: 8px 12px; border-radius: 6px; background: var(--field); border: 1px solid var(--line); margin-top: 6px; overflow-wrap: anywhere; }
+  .pub b { margin-right: 8px; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre.log { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 10px; background: var(--field); border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
+  ol.links { margin: 8px 0 0; padding-left: 22px; font-size: 13px; overflow-wrap: anywhere; }
+
+  #p-title { font-size: 19px; font-weight: 600; margin-top: 12px; }
+  .pblocks { display: grid; gap: 10px; margin-top: 12px; }
+  .pblocks img { display: block; max-width: 100%; max-height: 360px; border-radius: 6px; background: var(--track); }
+  .pblocks .plink { overflow-wrap: anywhere; }
+  .pmeta { margin: 4px 0 0; }
+  .pnote { margin: 12px 0 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 550; color: var(--muted); font-size: 12px; padding: 0 8px 8px 0; }
+  td { padding: 9px 8px 9px 0; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+  td .hint { display: block; }
+  .tag { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; background: var(--track); white-space: nowrap; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--bad); } .tag.run { color: var(--accent); }
+  @media (max-width: 600px) {
+    .vrow { grid-template-columns: 1fr 90px; } .vrow .label { grid-column: 1 / -1; grid-row: 2; }
+    ul.items li { grid-template-columns: 18px 26px 1fr auto; } ul.items .grip, ul.items .size { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <b>vidpub</b>
+  <nav>
+    <button data-tab="new" aria-current="page">New job</button>
+    <button data-tab="jobs">Jobs</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+<main>
+  <div id="tab-new">
+    <section class="card" id="progress" hidden aria-live="polite">
+      <div class="row" style="justify-content: space-between"><h2 style="margin: 0">Progress</h2><span id="run-state"></span></div>
+      <p class="hint" id="run-job" style="margin: 4px 0 10px"></p>
+      <div id="rows"></div>
+      <div class="pubs" id="pubs"></div>
+      <details id="links-box" hidden><summary>Play links</summary><ol class="links" id="links"></ol></details>
+      <button type="button" id="rebuild" style="margin-top: 12px" hidden>Discard my post edits and rebuild</button>
+      <details><summary>Log</summary><pre class="log" id="log"></pre></details>
+    </section>
+
+    <section class="card" id="preview" hidden>
+      <h2 style="margin: 0">Post preview</h2>
+      <p class="hint pmeta" id="p-meta"></p>
+      <input type="text" id="p-title" aria-label="Post title" autocomplete="off">
+      <div class="pblocks" id="p-blocks"></div>
+      <p class="hint pnote">This is exactly what gets sent. You can edit the title and the text; images and links come from the job.</p>
+      <div class="row" style="margin-top: 14px">
+        <button type="button" id="p-save" disabled>Save edits</button>
+        <button type="button" class="primary" id="p-send">Send to Patreon</button>
+        <span class="hint" id="p-status" role="status"></span>
+      </div>
+      <div class="pubs" id="p-results"></div>
+    </section>
+
+    <section class="card">
+      <h2>Files</h2>
+      <fieldset id="templates"><legend style="margin-top: 0">Post type</legend></fieldset>
+      <div class="row" style="margin-top: 14px">
+        <button id="pick">Choose folder…</button>
+        <select id="recent" aria-label="Recent folders" hidden></select>
+      </div>
+      <p class="hint" id="folder">Pick the folder your files are in. Videos upload straight from there; nothing is copied.</p>
+      <div class="row hint tools" id="tools" hidden>
+        <span id="count"></span>
+        <button id="sort" type="button">Sort by name</button>
+        <span>Drag <span aria-hidden="true">⋮⋮</span> or use ↑ ↓ to set the order in the post.</span>
+      </div>
+      <ul class="items" id="items"></ul>
+      <div id="collection-box">
+        <label for="collection">Bunny collection <span class="hint">optional</span></label>
+        <input type="text" id="collection" placeholder="e.g. October 2026" autocomplete="off">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Patreon post</h2>
+      <label class="check" id="post-on-box"><input type="checkbox" id="post-on" checked> Make a post with the videos</label>
+      <div id="post">
+        <label for="title">Title</label>
+        <input type="text" id="title" autocomplete="off">
+        <label for="text">Text <span class="hint">goes on top; URLs become links</span></label>
+        <textarea id="text"></textarea>
+        <p class="hint" id="template-hint" style="margin: 4px 0 0"></p>
+        <div class="grid2">
+          <div>
+            <label for="access">Who can see it</label>
+            <select id="access">
+              <option value="">Choose…</option>
+              <option value="public">Everyone (public)</option>
+              <option value="patrons">All members, free and paid</option>
+              <option value="paid">All paid tiers</option>
+              <option value="tiers">Specific tiers…</option>
+            </select>
+            <input type="text" id="tiers" placeholder="Tier names, comma-separated" aria-label="Tier names" style="margin-top: 6px" hidden>
+          </div>
+          <div>
+            <label for="thumbnail">Thumbnail</label>
+            <select id="thumbnail"><option value="">None</option></select>
+          </div>
+        </div>
+        <label for="pcollection">Patreon collection <span class="hint">optional</span></label>
+        <input type="text" id="pcollection" autocomplete="off">
+        <fieldset id="attachments-box" hidden><legend>Attachments</legend><div id="attachments"></div></fieldset>
+        <fieldset>
+          <legend>Publish with</legend>
+          <label class="check"><input type="checkbox" name="publish" value="patreon_browser" checked>
+            <span>Fill in Patreon for me <span class="hint">opens Chrome and leaves a draft for you to review. Needs <code>node patreon-login.ts</code> once.</span></span></label>
+          <label class="check"><input type="checkbox" name="publish" value="patreon_manual">
+            <span>Clipboard and checklist <span class="hint">you paste it into Patreon yourself</span></span></label>
+          <label class="check"><input type="checkbox" id="publish-now">
+            <span>Publish right away instead of leaving a draft <span class="hint">members get notified</span></span></label>
+        </fieldset>
+      </div>
+    </section>
+
+    <div class="row">
+      <button class="primary" id="start" disabled>Start</button>
+      <span class="hint" id="start-hint"></span>
+    </div>
+    <div class="errors" id="errors" role="alert"></div>
+  </div>
+
+  <div id="tab-jobs" hidden>
+    <section class="card">
+      <h2>Jobs</h2>
+      <p class="hint" id="jobs-empty" hidden>No jobs yet in the folders you've picked.</p>
+      <table id="jobs-table" hidden>
+        <thead><tr><th>Job</th><th>Files</th><th>Status</th><th>Result</th><th></th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div id="tab-settings" hidden>
+    <section class="card">
+      <h2>Bunny Stream</h2>
+      <p class="hint" style="margin: 0">Bunny dashboard → Stream → your library → API. Use that library's API key, not your account key. Saved in vidpub's <code>.env</code> on this Mac.</p>
+      <label for="lib">Library ID</label>
+      <input type="text" id="lib" inputmode="numeric" autocomplete="off">
+      <label for="key">API key</label>
+      <input type="password" id="key" autocomplete="off">
+      <div class="row" style="margin-top: 16px">
+        <button class="primary" id="save">Save</button>
+        <span class="hint" id="saved" role="status"></span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("t") ?? "";
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids.filter((k) => k != null && k !== false));
+  return e;
+};
+const link = (url, text = url) => (/^https:\/\//.test(url) ? el("a", { href: url, target: "_blank", rel: "noopener", textContent: text }) : el("span", { textContent: url }));
+const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${Math.round(b / 1e6)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`);
+const natural = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "x-vidpub-token": token, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok) throw new Error(data.error);
+  return data;
+}
+
+// ---- tabs
+function show(tab) {
+  for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
+  for (const t of ["new", "jobs", "settings"]) $(`tab-${t}`).hidden = t !== tab;
+  if (tab === "jobs") loadJobs().catch((e) => alert(e.message));
+}
+for (const b of document.querySelectorAll("nav button")) b.onclick = () => show(b.dataset.tab);
+
+// ---- post type (the engine's templates) and the folder's files
+let templates = []; // [{ id, label, needs: "videos" | "images" }]
+let template = "video-previews";
+let folder = null; // { dir, files, job }
+const lists = { videos: [], images: [] }; // [{ name, size, on }] in post order
+const needs = () => templates.find((t) => t.id === template)?.needs ?? "videos";
+const items = () => lists[needs()];
+
+function renderTemplates() {
+  $("templates").replaceChildren($("templates").querySelector("legend"), ...templates.map((t) => {
+    const [name, rest] = t.label.split(/:\s*/, 2);
+    const radio = el("input", { type: "radio", name: "template", value: t.id, checked: t.id === template, onchange: () => { template = t.id; syncPost(); renderItems(); } });
+    return el("label", { className: "check" }, radio, el("span", {}, `${name} `, el("span", { className: "hint", textContent: rest ?? "" })));
+  }));
+}
+
+function setFolder(f) {
+  folder = f;
+  const saved = f.job;
+  for (const [key, kind] of [["videos", "video"], ["images", "image"]]) {
+    const all = f.files.filter((x) => x.kind === kind);
+    const want = saved?.[key] ?? [];
+    lists[key] = [
+      ...want.map((n) => all.find((v) => v.name === n)).filter(Boolean).map((v) => ({ ...v, on: true })),
+      ...all.filter((v) => !want.includes(v.name)).sort(natural).map((v) => ({ ...v, on: !saved })),
+    ];
+  }
+  $("folder").textContent = `${f.dir}${saved ? "  ·  loaded its job.json" : ""}`;
+
+  const others = f.files.filter((x) => x.kind !== "video");
+  $("thumbnail").replaceChildren(el("option", { value: "", textContent: "None" }),
+    ...f.files.filter((x) => x.kind === "image").map((x) => el("option", { value: x.name, textContent: x.name })));
+  $("attachments").replaceChildren(...others.map((x) =>
+    el("label", { className: "check" }, el("input", { type: "checkbox", value: x.name }), el("span", { textContent: `${x.name} ` }, el("span", { className: "hint", textContent: size(x.size) })))));
+  $("attachments-box").hidden = !others.length;
+
+  if (saved) {
+    const p = saved.post;
+    if (saved.template) template = saved.template;
+    else if (!saved.videos?.length && saved.images?.length) template = "image-gallery";
+    $("collection").value = saved.collection ?? "";
+    $("post-on").checked = !!p;
+    $("title").value = p?.title ?? "";
+    $("text").value = p?.text ?? "";
+    $("thumbnail").value = p?.thumbnail ?? "";
+    $("access").value = Array.isArray(p?.access) ? "tiers" : (p?.access ?? "");
+    $("tiers").value = Array.isArray(p?.access) ? p.access.join(", ") : "";
+    $("pcollection").value = p?.collection ?? "";
+    for (const c of $("attachments").querySelectorAll("input")) c.checked = !!p?.attachments?.includes(c.value);
+    const targets = saved.publish ?? (p ? ["patreon_manual"] : []);
+    for (const c of document.querySelectorAll("input[name=publish]")) c.checked = targets.includes(c.value);
+    $("publish-now").checked = !!p?.publishNow;
+  }
+  renderTemplates();
+  syncPost();
+  renderItems();
+  loadPreview();
+}
+
+function renderItems() {
+  const list = items();
+  let pos = 0;
+  $("items").replaceChildren(...list.map((v, i) => {
+    const cb = el("input", { type: "checkbox", checked: v.on, onchange: () => { v.on = cb.checked; renderItems(); } });
+    cb.setAttribute("aria-label", `Include ${v.name}`);
+    const up = el("button", { type: "button", className: "up", textContent: "↑", disabled: i === 0, onclick: () => move(i, -1) });
+    const down = el("button", { type: "button", className: "down", textContent: "↓", disabled: i === list.length - 1, onclick: () => move(i, 1) });
+    up.setAttribute("aria-label", `Move ${v.name} up`);
+    down.setAttribute("aria-label", `Move ${v.name} down`);
+    const li = el("li", { draggable: true, className: v.on ? "" : "off" },
+      el("span", { className: "grip", textContent: "⋮⋮", ariaHidden: "true" }), cb,
+      el("span", { className: "pos", textContent: v.on ? `${++pos}.` : "" }),
+      el("span", { className: "name", textContent: v.name }),
+      el("span", { className: "size", textContent: size(v.size) }),
+      el("span", { className: "move" }, up, down));
+    li.dataset.i = i;
+    return li;
+  }));
+  $("tools").hidden = !list.length;
+  $("count").textContent = folder && !list.length ? `No ${needs()} in this folder.` : `${pos} of ${list.length} ${needs()} selected.`;
+  updateStart();
+}
+
+function move(i, d) {
+  const list = items();
+  [list[i], list[i + d]] = [list[i + d], list[i]];
+  renderItems();
+  const row = $("items").children[i + d];
+  const btn = row.querySelector(d < 0 ? ".up" : ".down");
+  (btn.disabled ? row.querySelector("input") : btn).focus();
+}
+
+let dragging = null;
+$("items").addEventListener("dragstart", (e) => {
+  dragging = e.target.closest("li");
+  dragging.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", "");
+});
+$("items").addEventListener("dragover", (e) => {
+  if (!dragging) return;
+  e.preventDefault();
+  const over = e.target.closest("li");
+  if (!over || over === dragging) return;
+  const r = over.getBoundingClientRect();
+  e.clientY > r.top + r.height / 2 ? over.after(dragging) : over.before(dragging);
+});
+$("items").addEventListener("dragend", () => {
+  if (!dragging) return;
+  const list = items();
+  lists[needs()] = [...$("items").children].map((li) => list[li.dataset.i]);
+  dragging = null;
+  renderItems();
+});
+$("sort").onclick = () => { items().sort(natural); renderItems(); };
+
+$("pick").onclick = async () => {
+  $("errors").textContent = "";
+  $("pick").disabled = true;
+  $("pick").textContent = "Waiting for the folder dialog…";
+  try {
+    const r = await api("/api/pick", {});
+    if (!r.cancelled) { setFolder(r); loadSession(); }
+  } catch (e) {
+    $("errors").textContent = e.message;
+  } finally {
+    $("pick").disabled = false;
+    $("pick").textContent = "Choose folder…";
+  }
+};
+async function openFolder(dir) {
+  $("errors").textContent = "";
+  setFolder(await api("/api/folder", { dir }));
+}
+$("recent").onchange = () => $("recent").value && openFolder($("recent").value).catch((e) => ($("errors").textContent = e.message));
+
+// ---- post
+function syncPost() {
+  const videos = needs() === "videos";
+  $("post-on-box").hidden = !videos; // an image gallery is only ever a post
+  $("collection-box").hidden = !videos;
+  $("post").hidden = videos && !$("post-on").checked;
+  $("tiers").hidden = $("access").value !== "tiers";
+  const t = templates.find((x) => x.id === template);
+  $("template-hint").textContent = t ? `Post layout: ${t.label.split(/:\s*/, 2)[1] ?? t.label}.` : "";
+}
+$("post-on").onchange = () => { syncPost(); updateStart(); };
+$("access").onchange = syncPost;
+
+function form() {
+  const kind = needs();
+  const on = kind === "images" || $("post-on").checked;
+  const checked = (sel) => [...document.querySelectorAll(sel)].filter((c) => c.checked).map((c) => c.value);
+  const a = $("access").value;
+  const tiers = $("tiers").value.split(",").map((t) => t.trim()).filter(Boolean);
+  return {
+    template: on ? template : undefined,
+    [kind]: items().filter((v) => v.on).map((v) => v.name),
+    collection: kind === "videos" ? $("collection").value.trim() || undefined : undefined,
+    post: on ? {
+      title: $("title").value.trim(),
+      text: $("text").value.trim() || undefined,
+      access: a === "tiers" ? (tiers.length ? tiers : undefined) : a || undefined,
+      thumbnail: $("thumbnail").value || undefined,
+      collection: $("pcollection").value.trim() || undefined,
+      attachments: checked("#attachments input"),
+      publishNow: $("publish-now").checked || undefined,
+    } : undefined,
+    publish: on ? checked("input[name=publish]") : undefined,
+  };
+}
+
+function updateStart() {
+  const running = !!live?.running;
+  const any = items().some((v) => v.on);
+  const post = needs() === "images" || $("post-on").checked;
+  $("start").disabled = !folder || running || !any;
+  $("start").textContent = needs() === "images" ? "Build the post" : post ? "Upload and build the post" : "Upload";
+  $("start-hint").textContent = running ? "Something is running." : !folder ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.`
+    : `Saves job.json in the folder${post ? ". You review the post before anything is sent." : "."}`;
+  $("p-send").disabled = running;
+}
+
+async function start(rebuild = false) {
+  $("errors").textContent = "";
+  $("start").disabled = true;
+  try {
+    await api("/api/start", { dir: folder.dir, form: form(), rebuild });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    $("errors").textContent = `Can't start yet:\n${e.message}`;
+  } finally {
+    updateStart();
+  }
+}
+$("start").onclick = () => start();
+$("rebuild").onclick = () => start(true);
+
+// ---- progress (Server-Sent Events: the server sends the whole run state on every change)
+let live = null;
+const events = new EventSource(`/events?t=${encodeURIComponent(token)}`);
+events.onmessage = (e) => {
+  const was = live?.running;
+  live = JSON.parse(e.data);
+  renderLive();
+  updateStart();
+  if (was && !live.running && folder?.dir === live.dir) loadPreview(); // a step just ended: show the post as saved
+};
+const pubRow = (p) => el("div", { className: "pub" },
+  el("b", { textContent: p.name }),
+  p.result ? link(p.result, /\/edit$/.test(p.result) ? `Open the draft: ${p.result}` : p.result)
+    : el("span", { className: "hint", textContent: p.running ? "working…" : "not sent yet" }));
+
+function renderLive() {
+  $("progress").hidden = !live;
+  if (!live) return;
+  $("run-state").textContent = live.running ? "Running" : live.error ? "Stopped" : "Done";
+  $("run-state").className = live.running ? "" : live.error ? "bad" : "ok";
+  $("run-job").textContent = live.jobPath;
+  $("rows").replaceChildren(...live.videos.map((v) => {
+    const ready = v.status === 4 || v.status === 8;
+    const bad = v.status === 5 || v.status === 6 || v.status === null;
+    const busy = !ready && !bad && v.status != null;
+    const width = ready || busy ? 100 : v.pct ?? 0;
+    return el("div", { className: `vrow${ready ? " ready" : bad ? " bad" : busy ? " busy" : ""}` },
+      el("span", { className: "name", textContent: v.name }),
+      el("span", { className: "label", textContent: v.pct != null && v.pct < 100 && v.status == null ? `${v.label} ${v.pct}%` : v.label }),
+      el("div", { className: "bar" }, el("i", { style: `transform: scaleX(${width / 100})` })));
+  }));
+  $("pubs").replaceChildren(
+    ...(live.step === "publish" ? live.publish.map(pubRow) : []),
+    ...(live.error ? [el("div", { className: "pub errors", textContent: `${live.error}\n\nFix it and try again: finished uploads are kept.` })] : []));
+  $("rebuild").hidden = live.running || !/edited by hand/.test(live.error ?? "");
+  $("links-box").hidden = !live.links.length;
+  $("links").replaceChildren(...live.links.map((v) => el("li", {}, `${v.title}: `, link(v.url))));
+  const log = $("log");
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
+  log.textContent = live.log.join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+
+// ---- post preview: <job>.post.json as saved, which is exactly what gets sent
+let preview = null; // { doc, publish, published }
+async function loadPreview() {
+  preview = folder ? await api("/api/post", { dir: folder.dir }).catch(() => ({ doc: null })) : { doc: null };
+  renderPreview();
+}
+function renderPreview() {
+  const doc = preview?.doc;
+  $("preview").hidden = !doc;
+  if (!doc) return;
+  const sent = preview.publish.length > 0 && preview.publish.every((p) => preview.published[p]);
+  $("p-meta").textContent = [
+    `Access: ${[doc.access].flat().join(", ")}`,
+    doc.collection && `Collection: ${doc.collection}`,
+    doc.thumbnail && `Thumbnail: ${doc.thumbnail.split("/").pop()}`,
+    doc.attachments?.length && `${doc.attachments.length} attachment${doc.attachments.length > 1 ? "s" : ""}`,
+    doc.publishNow ? "Publishes right away" : "Saved as a draft",
+  ].filter(Boolean).join("  ·  ");
+  $("p-title").value = doc.title;
+  $("p-title").disabled = sent;
+  $("p-blocks").replaceChildren(...doc.blocks.map((b) => {
+    if ("text" in b) {
+      const t = el("textarea", { className: "ptext", value: b.text, disabled: sent, oninput: dirty });
+      t.setAttribute("aria-label", "Post text");
+      t.rows = Math.min(12, b.text.split("\n").length + 1);
+      return t;
+    }
+    if ("image" in b) {
+      const img = el("img", { alt: "", loading: "lazy", src: /^https:\/\//.test(b.image) ? b.image : `/file?t=${encodeURIComponent(token)}&p=${encodeURIComponent(b.image)}` });
+      img.onerror = () => img.replaceWith(el("span", { className: "hint", textContent: `Image didn't load here: ${b.image}` }));
+      return img;
+    }
+    return Object.assign(link(b.link), { className: "plink" });
+  }));
+  $("p-save").disabled = true;
+  $("p-save").hidden = sent;
+  $("p-send").hidden = sent;
+  $("p-send").textContent = doc.publishNow ? "Publish on Patreon" : "Send to Patreon";
+  $("p-status").textContent = sent ? "Sent." : "";
+  $("p-results").replaceChildren(...preview.publish.map((name) => pubRow({ name, result: preview.published[name] })));
+}
+function dirty() { $("p-save").disabled = false; $("p-status").textContent = "Unsaved edits."; }
+$("p-title").oninput = dirty;
+
+async function savePreview() {
+  await api("/api/post/save", { dir: folder.dir, title: $("p-title").value, texts: [...$("p-blocks").querySelectorAll("textarea")].map((t) => t.value) });
+  await loadPreview();
+  $("p-status").textContent = "Saved.";
+}
+$("p-save").onclick = () => savePreview().catch((e) => ($("p-status").textContent = e.message));
+$("p-send").onclick = async () => {
+  if (preview.doc.publishNow && !confirm("Publish this post now? Members get notified.")) return;
+  try {
+    if (!$("p-save").disabled) await savePreview(); // send what's on screen
+    await api("/api/publish", { dir: folder.dir });
+    $("p-status").textContent = "Sending…";
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    $("p-status").textContent = e.message;
+  }
+};
+
+// ---- jobs
+async function loadJobs() {
+  const { jobs } = await api("/api/jobs");
+  $("jobs-empty").hidden = !!jobs.length;
+  $("jobs-table").hidden = !jobs.length;
+  $("jobs").replaceChildren(...jobs.map((j) => {
+    const published = j.publish.length > 0 && j.publish.every((p) => j.published[p]);
+    const [text, cls] = j.running ? ["running", "run"] : j.error ? ["failed", "bad"] : published || (!j.publish.length && j.uploaded === j.videos) ? ["done", "ok"]
+      : j.built ? ["ready to review", "run"] : ["unfinished", ""];
+    const results = Object.entries(j.published).map(([name, r]) => el("div", {}, `${name}: `, link(r, /\/edit$/.test(r) ? "draft" : r)));
+    const open = el("button", { type: "button", textContent: "Open", onclick: () => openFolder(j.dir).then(() => show("new"), (e) => alert(e.message)) });
+    const files = [j.videos && `${j.uploaded}/${j.videos} videos on Bunny`, j.images && `${j.images} images`].filter(Boolean).join(", ");
+    return el("tr", {},
+      el("td", {}, el("span", { textContent: j.dir.split("/").pop() }), el("span", { className: "hint", textContent: j.job })),
+      el("td", { textContent: files }),
+      el("td", {}, el("span", { className: `tag ${cls}`, textContent: text })),
+      el("td", {}, ...(results.length ? results : [el("span", { className: "hint", textContent: j.error ?? "—" })])),
+      el("td", {}, open));
+  }));
+}
+
+// ---- settings
+async function loadSession() {
+  const s = await api("/api/session");
+  if (!templates.length) {
+    templates = s.templates;
+    renderTemplates();
+    syncPost();
+  }
+  $("recent").hidden = !s.folders.length;
+  $("recent").replaceChildren(el("option", { value: "", textContent: "Recent folders" }),
+    ...s.folders.map((d) => el("option", { value: d, textContent: d.replace(/^\/Users\/[^/]+/, "~") })));
+  $("lib").value = s.libraryId;
+  $("key").placeholder = s.hasKey ? "Saved. Leave blank to keep it." : "Paste the library's API key";
+  return s;
+}
+$("save").onclick = async () => {
+  $("saved").textContent = "Saving…";
+  try {
+    const r = await api("/api/settings", { libraryId: $("lib").value, apiKey: $("key").value });
+    $("key").value = "";
+    $("saved").textContent = r.check;
+    loadSession();
+  } catch (e) {
+    $("saved").textContent = e.message;
+  }
+};
+
+syncPost();
+updateStart();
+loadSession().then((s) => { if (!s.libraryId || !s.hasKey) show("settings"); }, (e) => ($("errors").textContent = e.message));
+</script>
+</body>
+</html>

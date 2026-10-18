@@ -6,7 +6,8 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test vidpub.test.ts",
+    "ui": "node ui/server.ts",
+    "test": "node --test vidpub.test.ts ui/server.test.ts",
     "typecheck": "tsc"
   },
   "devDependencies": {

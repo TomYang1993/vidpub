@@ -35,8 +35,15 @@ export type Job = {
 export type Host = Pick<Bunny, "findOrCreateCollection" | "createVideo" | "status" | "deleteVideo" | "tusCreate" | "tusUpload" | "playUrl" | "previewUrl">;
 type Rec = { guid?: string; tusUrl?: string | null };
 type State = { collection?: { name: string; id: string }; videos: Record<string, Rec>; published: Record<string, string> };
+/** Progress for a UI. statuses are Bunny's REST codes, -1 = check failed; publish fires before (no result) and after. */
+export type RunEvent =
+  | { type: "upload"; video: string; fresh: boolean; attempt: number }
+  | { type: "encoding"; statuses: Record<string, number | null> }
+  | { type: "ready"; videos: Video[] }
+  | { type: "publish"; name: string; result?: string };
+type OnEvent = (e: RunEvent) => void;
 type DocFile = { inputs: string; built: string; doc: PostDoc }; // hashes of the job inputs and of the doc as built
-const IMAGE_TYPES = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic"]);
+export const IMAGE_TYPES = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic"]);
 
 const stem = (p: string) => basename(p, extname(p));
 const ready = (s: number | null) => s !== null && READY.has(s);
@@ -141,7 +148,7 @@ export function savePost(job: Job, doc: PostDoc) {
 }
 
 /** Send <job>.post.json, exactly as saved, to each publisher that hasn't run yet. */
-export async function publishPost(job: Job, publishers: Record<string, Publisher> = PUBLISHERS) {
+export async function publishPost(job: Job, publishers: Record<string, Publisher> = PUBLISHERS, onEvent: OnEvent = () => {}) {
   const state = readState(job);
   const pending = job.publish.filter((name) => !state.published[name]);
   if (!pending.length) return;
@@ -149,13 +156,15 @@ export async function publishPost(job: Job, publishers: Record<string, Publisher
   if (!file) throw new Error(`no ${postPath(job)} yet: build the post first`);
   if (file.inputs !== inputsHash(job, state)) throw new Error(`the job changed since ${postPath(job)} was built: rebuild and review it before publishing`);
   for (const name of pending) {
+    onEvent({ type: "publish", name });
     state.published[name] = await publishers[name](file.doc, job.path);
     writeJson(statePath(job), state);
+    onEvent({ type: "publish", name, result: state.published[name] });
   }
 }
 
 /** Upload every video and wait until all are playable. Returns them in job order. */
-export async function uploadVideos(job: Job, bunny: Host, sleep: Sleep = delay): Promise<Video[]> {
+export async function uploadVideos(job: Job, bunny: Host, sleep: Sleep = delay, onEvent: OnEvent = () => {}): Promise<Video[]> {
   const state = readState(job);
   const save = () => writeJson(statePath(job), state);
 
@@ -178,9 +187,10 @@ export async function uploadVideos(job: Job, bunny: Host, sleep: Sleep = delay):
       if (!fresh && s !== 0) continue; // ready, or uploaded and encoding
       if (fresh && ++attempts[v] > MAX_ATTEMPTS) throw new Error(`${basename(v)}: gave up after ${MAX_ATTEMPTS} uploads (Bunny status ${s})`);
       console.log(`${fresh ? "uploading" : "resuming"} ${basename(v)}`);
+      onEvent({ type: "upload", video: v, fresh, attempt: attempts[v] });
       await upload(bunny, v, rec, collectionId, save, fresh);
     }
-    const statuses = await waitEncoded(bunny, recs, sleep);
+    const statuses = await waitEncoded(bunny, recs, sleep, onEvent);
     const notReady = Object.keys(statuses).filter((v) => !ready(statuses[v]));
     if (!notReady.length) break;
     stuck = new Set(notReady.filter((v) => !settled(statuses[v])));
@@ -192,6 +202,7 @@ export async function uploadVideos(job: Job, bunny: Host, sleep: Sleep = delay):
     videos.push({ title: stem(v), url: bunny.playUrl(recs[v].guid!), preview: await bunny.previewUrl(recs[v].guid!) });
   }
   for (const v of videos) console.log(`${v.title}: ${v.url}`);
+  onEvent({ type: "ready", videos });
   return videos;
 }
 
@@ -217,7 +228,7 @@ async function upload(bunny: Host, path: string, rec: Rec, collectionId: string 
 }
 
 /** Poll until every video is ready or failed, or ENCODE_TIMEOUT_MS passes. */
-async function waitEncoded(bunny: Host, recs: Record<string, Rec>, sleep: Sleep) {
+async function waitEncoded(bunny: Host, recs: Record<string, Rec>, sleep: Sleep, onEvent: OnEvent) {
   const deadline = Date.now() + ENCODE_TIMEOUT_MS;
   while (true) {
     const statuses: Record<string, number | null> = {};
@@ -230,6 +241,7 @@ async function waitEncoded(bunny: Host, recs: Record<string, Rec>, sleep: Sleep)
         statuses[v] = -1;
       }
     }
+    onEvent({ type: "encoding", statuses });
     const pending = Object.values(statuses).filter((s) => !settled(s)).length;
     if (!pending || Date.now() > deadline) return statuses;
     console.log(`encoding: ${pending}/${Object.keys(recs).length} pending`);
@@ -237,7 +249,7 @@ async function waitEncoded(bunny: Host, recs: Record<string, Rec>, sleep: Sleep)
   }
 }
 
-function notify(msg: string) { // macOS notification. Runs take hours; say when they end.
+export function notify(msg: string) { // macOS notification. Runs take hours; say when they end.
   spawnSync("osascript", ["-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "vidpub"', "-e", "end run", msg]);
 }
 

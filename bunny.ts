@@ -45,13 +45,15 @@ export class Bunny {
   fetch: Fetch;
   sleep: Sleep;
   chunk: number;
+  onUpload?: (path: string, sent: number, size: number) => void; // progress, after every chunk
 
-  constructor(libraryId: string | number, apiKey: string, opts: { fetch?: Fetch; sleep?: Sleep; chunk?: number } = {}) {
+  constructor(libraryId: string | number, apiKey: string, opts: { fetch?: Fetch; sleep?: Sleep; chunk?: number; onUpload?: Bunny["onUpload"] } = {}) {
     this.lib = String(libraryId);
     this.key = apiKey;
     this.fetch = opts.fetch ?? ((url, init) => fetch(url, init));
     this.sleep = opts.sleep ?? delay;
     this.chunk = opts.chunk ?? 64 * 1024 * 1024; // bytes per PATCH = most a dropped connection can cost
+    this.onUpload = opts.onUpload;
   }
 
   // GET/DELETE retry on network errors, 429 and 5xx. POST isn't idempotent, so callers handle that.
@@ -172,6 +174,7 @@ export class Bunny {
           offset = uploadOffset(r);
           fails = 0;
           console.log(`  ${name}: ${Math.floor((offset * 100) / size)}%`);
+          this.onUpload?.(path, offset, size);
         } catch (e) {
           const code = e instanceof HttpError ? e.status : null;
           if (code === 404 || code === 410) return false;
