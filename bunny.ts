@@ -104,6 +104,11 @@ export class Bunny {
     }
   }
 
+  /** Animated preview ("Preview Animation URL (WebP)"); its CDN host comes from the video's thumbnailUrl. */
+  async previewUrl(videoId: string): Promise<string> {
+    return new URL("preview.webp", (await this.api("GET", `/videos/${videoId}`)).thumbnailUrl).href;
+  }
+
   playUrl(videoId: string) {
     return `https://player.mediadelivery.net/play/${this.lib}/${videoId}`;
   }

@@ -18,7 +18,7 @@ const POLL_MS = 30_000;
 const ENCODE_TIMEOUT_MS = 6 * 3600_000; // still not ready or failed after this = stuck, re-upload
 
 export type Job = { path: string; videos: string[]; collection?: string; post?: Post; publish: string[] };
-export type Host = Pick<Bunny, "findOrCreateCollection" | "createVideo" | "status" | "deleteVideo" | "tusCreate" | "tusUpload" | "playUrl">;
+export type Host = Pick<Bunny, "findOrCreateCollection" | "createVideo" | "status" | "deleteVideo" | "tusCreate" | "tusUpload" | "playUrl" | "previewUrl">;
 type Rec = { guid?: string; tusUrl?: string | null };
 type State = { collection?: { name: string; id: string }; videos: Record<string, Rec>; published: Record<string, string> };
 
@@ -96,7 +96,10 @@ export async function run(job: Job, bunny: Host, opts: { sleep?: Sleep; publishe
     console.log(`retrying: ${notReady.map((v) => basename(v)).join(", ")}`);
   }
 
-  const videos: Video[] = job.videos.map((v) => ({ title: stem(v), url: bunny.playUrl(recs[v].guid!) }));
+  const videos: Video[] = [];
+  for (const v of job.videos) {
+    videos.push({ title: stem(v), url: bunny.playUrl(recs[v].guid!), preview: await bunny.previewUrl(recs[v].guid!) });
+  }
   for (const v of videos) console.log(`${v.title}: ${v.url}`);
   for (const name of job.publish) {
     if (state.published[name]) continue;

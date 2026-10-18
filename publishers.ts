@@ -11,19 +11,22 @@ import type { BrowserContext, Locator } from "playwright";
 
 export type Post = {
   title: string;
-  content?: string; // {links} becomes one numbered line per video
+  content?: string; // {links}: one numbered line per video. {previews}: per video, its preview image then its play URL
   thumbnail?: string; // image path
   access?: string | string[]; // "public" | "patrons" | "paid" | list of tier names
   collection?: string; // Patreon collection (not the Bunny one)
   attachments?: string[]; // file paths
   publishNow?: boolean; // patreon_browser: publish right away instead of leaving a draft to review
 };
-export type Video = { title: string; url: string };
+export type Video = { title: string; url: string; preview?: string }; // preview: animated WebP
 export type Publisher = (post: Post, videos: Video[], jobPath: string) => string | Promise<string>;
 
 export function renderContent(post: Post, videos: Video[]) {
   const links = videos.map((v, i) => `${i + 1}. ${v.title}: ${v.url}`).join("\n");
-  return (post.content ?? "{links}").trim().replaceAll("{links}", () => links); // fn: keeps "$" in titles literal
+  const previews = videos.map((v) => [v.preview, v.url].filter(Boolean).join("\n")).join("\n\n");
+  return (post.content ?? "{links}").trim()
+    .replaceAll("{links}", () => links) // fn: keeps "$" in titles literal
+    .replaceAll("{previews}", () => previews);
 }
 
 // ponytail: Patreon's API can't create posts (v2 is read-only for posts), so this writes the content
@@ -79,6 +82,9 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
     title: page.getByRole("textbox", { name: "Title" }),
     content: page.getByRole("textbox", { name: "Text input field for post content" }),
     imagePost: page.getByRole("button", { name: "Image", exact: true }), // thumbnail = image post's cover
+    imageBlock: page.getByRole("menuitem", { name: "Image", exact: true }), // inline image, under "Click to add below"
+    imageUrl: page.getByPlaceholder("Type or paste image URL"), // by URL keeps a WebP animated; a file upload doesn't
+    imageConfirm: page.getByRole("button", { name: "Confirm", exact: true }),
     browse: page.getByRole("button", { name: "Browse", exact: true }),
     thumbnailUploaded: page.getByRole("button", { name: "Add image" }),
     addBlock: page.getByRole("button", { name: "Click to add below" }),
@@ -138,16 +144,33 @@ export async function patreonBrowser(post: Post, videos: Video[], jobPath: strin
 
     await S.title.fill(post.title);
     const text = renderContent(post, videos);
+    // Preview lines go in as markers; each marker gets its image inserted below it, then the marker is removed.
+    const images = videos.flatMap((v) => (v.preview && text.includes(v.preview) ? [v.preview] : []));
+    const marked = images.reduce((t, url, i) => t.replaceAll(url, `vidpub-image-${i}`), text);
     await S.content.click();
     await S.content.evaluate((el, { text, html }) => { // paste HTML so links stay links
       const data = new DataTransfer();
       data.setData("text/plain", text);
       data.setData("text/html", html);
       el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
-    }, { text, html: contentHtml(text) });
+    }, { text: marked, html: contentHtml(marked) });
+    for (const [i, url] of images.entries()) {
+      const marker = S.content.getByText(`vidpub-image-${i}`, { exact: true });
+      await marker.click();
+      await S.addBlock.click();
+      await S.imageBlock.click();
+      await S.imageUrl.fill(url);
+      await S.imageConfirm.click();
+      await S.content.locator(`img[src="${url}"]`).waitFor();
+      await marker.click({ clickCount: 3 });
+      await page.keyboard.press("Backspace"); // clear the marker text...
+      await page.keyboard.press("Backspace"); // ...and its now-empty paragraph
+    }
     if ((await S.title.inputValue()) !== post.title) fail("title didn't stick");
-    const shown = await S.content.innerText();
-    for (const v of videos) if (!shown.includes(v.url)) fail(`content is missing ${v.url}`);
+    const want = text.match(/https?:\/\/[^\s<]+/g) ?? []; // every image and link, in order
+    const got = await S.content.evaluate((el) => [...el.querySelectorAll("img[src], a[href]")].map((n) => n.getAttribute("src") ?? n.getAttribute("href")));
+    if (want.join("\n") !== got.join("\n")) fail(`content came out wrong: expected ${want.join(" ")} but got ${got.join(" ")}`);
+    if ((await S.content.innerText()).includes("vidpub-image-")) fail("an image marker was left in the content");
 
     if (post.attachments?.length) {
       await S.addBlock.click();

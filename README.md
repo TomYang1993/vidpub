@@ -29,7 +29,7 @@ A batch is a job file, see [job.example.json](job.example.json). Paths are relat
 | `videos` | required; uploaded and linked in this order; title = file name without extension |
 | `collection` | Bunny collection; omit to upload outside any collection |
 | `post.title` | required when there's a post |
-| `post.content` | `{links}` becomes one numbered line per video; default is just the links |
+| `post.content` | `{links}` becomes one numbered line per video; `{previews}` becomes, per video, its animated preview (Bunny's WebP) then its play URL; default is just the links |
 | `post.thumbnail`, `post.attachments` | file paths |
 | `post.access` | `"public"`, `"patrons"`, `"paid"` or a list of tier names |
 | `post.collection` | Patreon collection (not the Bunny one) |
@@ -54,7 +54,7 @@ publishers work around that:
 - **`patreon_manual`** copies the content to your clipboard and writes `<job>.patreon.txt`: the content plus a
   checklist (title, thumbnail, access, collection, attachments) to apply in the editor yourself.
 - **`patreon_browser`** fills in Patreon's web editor for you: thumbnail (as the post's cover image), title,
-  content with clickable links, attachments, access, collection. It leaves a **draft** and prints its URL. Set
+  content with clickable links (and `{previews}` as inline animated images), attachments, access, collection. It leaves a **draft** and prints its URL. Set
   `post.publishNow: true` to publish instead. `post.access` is required, so links never go out public by
   accident.
 
@@ -86,6 +86,16 @@ use `patreon_manual`.
 The Patreon paywall hides the post, not the Bunny link. Anyone the link is shared with can watch. Bunny's
 library → Security → **Allowed domains** checks the Referer header. Patreon may strip the Referer from
 outbound links, which would block your patrons too, so test with a patron account before turning it on.
+
+Preview images are inserted by URL (`https://vz-….b-cdn.net/<guid>/preview.webp`; the host comes from Bunny's
+`thumbnailUrl`, so there's nothing to configure). Uploading the file instead makes Patreon re-encode it as a still
+image. If your library blocks direct file access or limits allowed domains, make sure Patreon pages can load them.
+
+## Ideas, not built yet
+
+- `videos` pointing at a folder instead of listing every file.
+- One post per video from a single job.
+- Scheduling (Patreon's "Set publish date").
 
 ## Extending
 

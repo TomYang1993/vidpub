@@ -53,6 +53,9 @@ class FakeBunny {
   playUrl(guid: string) {
     return `https://play/${guid}`;
   }
+  async previewUrl(guid: string) {
+    return `https://cdn/${guid}/preview.webp`;
+  }
 }
 
 function recorder() {
@@ -97,7 +100,7 @@ test("job: failed encode is replaced, publish runs once, rerun is a no-op", asyn
   assert.deepEqual(fake.created.map((c) => c.guid), ["b-1", "a-2", "b-3"]);
   assert.ok(fake.created.every((c) => c.collectionId === "col:Oct"));
   assert.ok(!fake.videos.has("b-1"));
-  assert.deepEqual(rec.calls, [[{ title: "b", url: "https://play/b-3" }, { title: "a", url: "https://play/a-2" }]]);
+  assert.deepEqual(rec.calls, [[{ title: "b", url: "https://play/b-3", preview: "https://cdn/b-3/preview.webp" }, { title: "a", url: "https://play/a-2", preview: "https://cdn/a-2/preview.webp" }]]);
 
   await run(loadJob(path, rec.publishers), fake, { sleep: noSleep, publishers: rec.publishers });
   assert.equal(fake.created.length, 3);
@@ -117,7 +120,7 @@ test("single video: no collection, no post", async () => {
   const fake = new FakeBunny({ solo: [4] });
   const videos = await run(loadJob(job("solo", ["solo.mov"])), fake, { sleep: noSleep });
   assert.deepEqual(fake.created, [{ guid: "solo-1", collectionId: undefined }]);
-  assert.deepEqual(videos, [{ title: "solo", url: "https://play/solo-1" }]);
+  assert.deepEqual(videos, [{ title: "solo", url: "https://play/solo-1", preview: "https://cdn/solo-1/preview.webp" }]);
 });
 
 test("bad job lists every problem before uploading anything", () => {
@@ -125,6 +128,11 @@ test("bad job lists every problem before uploading anything", () => {
   assert.throws(() => loadJob(path), (e: Error) =>
     ["listed twice", "missing: " + join(tmp, "typos", "gone.mp4"), "not a video", "post.title", "x.jpg", "unknown publisher: nope"]
       .every((s) => e.message.includes(s)));
+});
+
+test("post content: {previews} is each preview, then its play URL", () => {
+  const videos = [{ title: "a", url: "u1", preview: "p1" }, { title: "b", url: "u2", preview: "p2" }];
+  assert.equal(renderContent({ title: "t", content: "Free:\n\n{previews}" }, videos), "Free:\n\np1\nu1\n\np2\nu2");
 });
 
 test("post content: {links} placeholder, $ in titles kept", () => {
