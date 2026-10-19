@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { applyEdits, listFolder, postProblems, writeJob } from "./server.ts";
 
+process.env.VIDPUB_TEMPLATES = mkdtempSync(join(tmpdir(), "vidpub-tpl-")); // never the user's own saved templates
+
 test("GUI job: saved as a CLI job.json and read back; bad input lists every problem and keeps the saved job", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-ui-")));
   for (const f of ["02.mp4", "01.mp4", "cover.jpg", "notes.pdf"]) writeFileSync(join(dir, f), "x");
@@ -37,6 +39,28 @@ test("preview edits change only the title and text blocks; emptied text is dropp
   const edited = applyEdits(doc, body);
   assert.deepEqual(edited, { ...doc, title: "October", blocks: [{ text: "Hello" }, { image: "https://cdn/p.webp" }, { link: "https://play/1" }] });
   assert.deepEqual(applyEdits(doc, { title: 5, texts: "nope" }), doc);
+});
+
+test("preview paywall: placed, moved, removed; a malformed one is refused", () => {
+  const doc = { title: "T", access: "paid", blocks: [{ text: "free" }, { image: "https://c/1.webp" }, { link: "https://p/1" }] };
+  const placed = applyEdits(doc, { paywall: 2 });
+  assert.deepEqual(placed.blocks.map((b) => Object.keys(b)[0]), ["text", "image", "paywall", "link"]);
+  assert.deepEqual(applyEdits(placed, { paywall: 0 }).blocks[0], { paywall: true }); // moved, still one
+  assert.equal(applyEdits(placed, { paywall: 0 }).blocks.filter((b) => "paywall" in b).length, 1);
+  assert.deepEqual(applyEdits(placed, { paywall: null }).blocks, doc.blocks);
+  assert.deepEqual(applyEdits(placed, {}).blocks, placed.blocks); // absent: unchanged
+  assert.deepEqual(applyEdits(doc, { paywall: 99 }).blocks.at(-1), { paywall: true }); // clamped
+  // position counts the blocks as shown, before an emptied text block drops out
+  assert.deepEqual(applyEdits(doc, { texts: [""], paywall: 1 }).blocks.map((b) => Object.keys(b)[0]), ["paywall", "image", "link"]);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-pw-")));
+  const job = { path: join(dir, "job.json"), videos: [], images: [], publish: [] };
+  assert.deepEqual(postProblems(dir, job, placed), []);
+  assert.deepEqual(postProblems(dir, job, { ...doc, blocks: [{ paywall: "yes" }] } as never), ["the post file is malformed: rebuild it"]);
+  const ok = { ...doc, blocks: [{ divider: true }, { button: { text: "Play", url: "https://p/1", caption: "a" } }] };
+  assert.deepEqual(postProblems(dir, job, ok as never), []);
+  for (const button of [{ text: "Play", url: "/etc/hosts" }, { text: "Play", url: "https://p", extra: 1 }]) {
+    assert.deepEqual(postProblems(dir, job, { ...doc, blocks: [{ button }] } as never), ["the post file is malformed: rebuild it"]);
+  }
 });
 
 test("a downloaded folder can't make Send upload files from elsewhere, or make the GUI write through a symlink", () => {

@@ -15,7 +15,8 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
-import { PATREON_PROFILE, PUBLISHERS, TEMPLATES, type PostDoc, type Publisher, type Video } from "../publishers.ts";
+import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
+import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
 import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, savePost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
 /** A job as the page sends it: names of files in the picked folder instead of paths. */
@@ -78,18 +79,23 @@ export function writeJob(dir: string, form: Form, publishers: Record<string, Pub
   return loadJob(join(dir, "job.json"), publishers);
 }
 
-/** The page's edits to a saved post. Only the title and the wording of existing text blocks can change, so the page
- *  can't slip in an image path (a publisher would upload that file). Emptied text blocks are dropped. */
-export function applyEdits(doc: PostDoc, edits: { title?: unknown; texts?: unknown }): PostDoc {
+/** The page's edits to a saved post. Only the title, the wording of existing text blocks and where the paywall sits
+ *  can change, so the page can't slip in an image path (a publisher would upload that file). Emptied text blocks are
+ *  dropped. paywall: its position among the other blocks as shown (0 = top), null = no paywall, absent = unchanged. */
+export function applyEdits(doc: PostDoc, edits: { title?: unknown; texts?: unknown; paywall?: unknown }): PostDoc {
   const texts = Array.isArray(edits.texts) ? edits.texts : [];
   let i = 0;
-  const blocks = doc.blocks
-    .map((b) => {
-      if (!("text" in b)) return b;
-      const t = texts[i++];
-      return typeof t === "string" ? { text: t.trim() } : b;
-    })
-    .filter((b) => !("text" in b) || b.text);
+  let blocks = doc.blocks.map((b) => {
+    if (!("text" in b)) return b;
+    const t = texts[i++];
+    return typeof t === "string" ? { text: t.trim() } : b;
+  });
+  const at = edits.paywall;
+  if (at === null || Number.isInteger(at)) {
+    blocks = blocks.filter((b) => !("paywall" in b));
+    if (at !== null) blocks.splice(Math.max(0, Math.min(blocks.length, at as number)), 0, { paywall: true });
+  }
+  blocks = blocks.filter((b) => !("text" in b) || b.text);
   return { ...doc, title: typeof edits.title === "string" && edits.title.trim() ? edits.title.trim() : doc.title, blocks };
 }
 
@@ -100,7 +106,11 @@ export function postProblems(dir: string, job: Job, doc: PostDoc): string[] {
   const str = (x: unknown): x is string => typeof x === "string";
   const shaped = Array.isArray(doc.blocks) && (doc.thumbnail === undefined || str(doc.thumbnail))
     && (doc.attachments === undefined || (Array.isArray(doc.attachments) && doc.attachments.every(str)))
-    && doc.blocks.every((b: unknown) => !!b && typeof b === "object" && Object.keys(b).length === 1 && Object.values(b).every(str));
+    && doc.blocks.every((b: any) => !!b && typeof b === "object" && Object.keys(b).length === 1
+      && ("paywall" in b || "divider" in b ? Object.values(b)[0] === true
+        : "button" in b ? !!b.button && str(b.button.text) && str(b.button.url) && /^https:\/\//.test(b.button.url)
+          && (b.button.caption === undefined || str(b.button.caption)) && Object.keys(b.button).every((k) => ["text", "url", "caption"].includes(k))
+        : Object.values(b).every(str)));
   if (!shaped) return ["the post file is malformed: rebuild it"]; // e.g. attachments: "/etc/hosts" would pass a per-entry check
   const local = (p?: string) => (str(p) && !/^https?:\/\//.test(p) ? [p] : []);
   return [
@@ -154,6 +164,8 @@ export function serve(opts: {
   chooseFolder?: () => Promise<string | null>;
   recentFile?: string; // folders picked so far: the only places this server reads
   envFile?: string;
+  readPatreon?: () => Promise<PatreonOptions>; // opens Chrome on the Patreon editor
+  patreonCache?: () => PatreonOptions | null;
 } = {}): Promise<{ server: Server; url: string }> {
   const {
     publishers = PUBLISHERS,
@@ -161,7 +173,12 @@ export function serve(opts: {
     chooseFolder = osascriptFolder,
     recentFile = join(homedir(), ".vidpub", "ui.json"),
     envFile = join(import.meta.dirname, "..", ".env"),
+    readPatreon = readPatreonOptions,
+    patreonCache = () => readPatreonCache(),
   } = opts;
+  let readingPatreon = false;
+  // read once, like the server's own code: a page edited while the server runs would otherwise talk to old code
+  const page = readFileSync(join(import.meta.dirname, "index.html"));
   const token = Buffer.from(randomBytes(32).toString("base64url"));
   let recent: string[] = existsSync(recentFile) ? JSON.parse(readFileSync(recentFile, "utf8")).folders : [];
   let live: Live | null = null;
@@ -282,7 +299,7 @@ export function serve(opts: {
 
   /** Step 2: send <job>.post.json, exactly as saved, to the job's publishers. */
   function publish(dir: string) {
-    if (live?.running) throw fail(409, "something is already running");
+    if (live?.running || readingPatreon) throw fail(409, "something is already running");
     const { job, doc } = readPost(dir);
     if (!job || !doc) throw fail(400, "no post yet: press Start first");
     const problems = postProblems(dir, job, doc);
@@ -357,7 +374,7 @@ export function serve(opts: {
           "referrer-policy": "no-referrer", // the token is in this page's URL; links out must not carry it
           "x-content-type-options": "nosniff",
           "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' https: data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        }).end(readFileSync(join(import.meta.dirname, "index.html")));
+        }).end(page);
       } else if (route === "GET /events") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
         res.write(`data: ${JSON.stringify(live)}\n\n`);
@@ -365,8 +382,24 @@ export function serve(opts: {
         req.on("close", () => clients.delete(res));
       } else if (route === "GET /api/session") {
         const env = readEnv();
-        const templates = Object.entries(TEMPLATES).map(([id, t]) => ({ id, label: t.label, needs: t.needs }));
-        json(res, 200, { folders: recent, templates, libraryId: env.BUNNY_LIBRARY_ID ?? "", hasKey: !!env.BUNNY_API_KEY });
+        const { draft, ...patreon } = patreonCache() ?? { tiers: [], collections: [], read: "" };
+        json(res, 200, { folders: recent, templates: Object.values(loadTemplates()), patreon, libraryId: env.BUNNY_LIBRARY_ID ?? "", hasKey: !!env.BUNNY_API_KEY });
+      } else if (route === "POST /api/templates/save") {
+        const t = saveTemplate((await body(req)).template);
+        json(res, 200, { id: t.id, templates: Object.values(loadTemplates()) });
+      } else if (route === "POST /api/templates/delete") {
+        deleteTemplate(String((await body(req)).id));
+        json(res, 200, { templates: Object.values(loadTemplates()) });
+      } else if (route === "POST /api/patreon/refresh") {
+        // one Chrome on the Patreon profile at a time: it's locked while open
+        if (readingPatreon || (live?.running && live.step === "publish")) throw fail(409, "Chrome is busy with Patreon: try again when it's done");
+        readingPatreon = true;
+        try {
+          const { draft, ...patreon } = await readPatreon();
+          json(res, 200, patreon);
+        } finally {
+          readingPatreon = false;
+        }
       } else if (route === "GET /api/jobs") {
         json(res, 200, { jobs: jobs() });
       } else if (route === "POST /api/pick") {

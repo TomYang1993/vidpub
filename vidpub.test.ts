@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
-import { TEMPLATES, contentHtml, type PostDoc } from "./publishers.ts";
+import { contentHtml, type PostDoc } from "./publishers.ts";
+import { BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate } from "./templates.ts";
 import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "vidpub-"));
+process.env.VIDPUB_TEMPLATES = join(tmp, "templates"); // never the user's own saved templates
 const noSleep = async () => {};
 
 function job(name: string, files: string[], spec?: object) {
@@ -146,9 +148,61 @@ test("image-gallery: image-only job never touches Bunny", async () => {
 });
 
 test("templates: video-previews without text, image-gallery", () => {
+  const [previews, gallery] = BUILTIN;
   const videos = [{ title: "a", url: "u1", preview: "p1" }, { title: "b", url: "u2" }];
-  assert.deepEqual(TEMPLATES["video-previews"].build(undefined, { videos }), [{ image: "p1" }, { link: "u1" }, { link: "u2" }]);
-  assert.deepEqual(TEMPLATES["image-gallery"].build("  Hi \n", { images: ["/x.jpg"] }), [{ text: "Hi" }, { image: "/x.jpg" }]);
+  assert.deepEqual(expand(previews, undefined, { videos }), [{ image: "p1" }, { link: "u1" }, { link: "u2" }]);
+  assert.deepEqual(expand(gallery, "  Hi \n", { images: ["/x.jpg"] }), [{ text: "Hi" }, { image: "/x.jpg" }]);
+});
+
+test("saved template: blocks and repeat sections, all block types; saving overrides a built-in", () => {
+  const t = saveTemplate({
+    name: "Member videos", needs: "videos",
+    blocks: [
+      { text: "{text}" }, { text: "{count} videos this week" },
+      { repeat: [{ image: "{preview}" }, { text: "{n}. {name}" }, { button: { text: "Play {n}", url: "{play}", caption: "{name}" } }] },
+      { divider: true },
+      { repeat: [{ link: "{play}" }] },
+      { paywall: true }, { text: "Thanks!" },
+    ],
+  });
+  assert.equal(t.id, "member-videos");
+  assert.equal(loadTemplates()["member-videos"].name, "Member videos");
+  const videos = [{ title: "a", url: "https://p/1", preview: "https://c/1.webp" }, { title: "b", url: "https://p/2" }];
+  assert.deepEqual(expand(t, "", { videos }), [
+    { text: "2 videos this week" },
+    { image: "https://c/1.webp" }, { text: "1. a" }, { button: { text: "Play 1", url: "https://p/1", caption: "a" } },
+    { text: "2. b" }, { button: { text: "Play 2", url: "https://p/2", caption: "b" } }, // no preview: its image drops out
+    { divider: true },
+    { link: "https://p/1" }, { link: "https://p/2" },
+    { paywall: true }, { text: "Thanks!" },
+  ]);
+  const long = checkTemplate({ name: "long", needs: "videos", blocks: [{ repeat: [{ button: { text: "{name}", url: "{play}" } }] }] });
+  assert.throws(() => expand(long, "", { videos: [{ title: "x".repeat(36), url: "https://p" }] }), /over Patreon's 35 characters/);
+  saveTemplate({ ...BUILTIN[0], id: undefined, name: "Video previews", blocks: [{ repeat: [{ link: "{play}" }] }] });
+  assert.deepEqual(loadTemplates()["video-previews"].blocks, [{ repeat: [{ link: "{play}" }] }]);
+  deleteTemplate("video-previews");
+  assert.deepEqual(loadTemplates()["video-previews"].blocks[0], { text: "{text}" });
+});
+
+test("bad templates list every problem", () => {
+  assert.throws(() => checkTemplate({
+    name: "x", needs: "videos",
+    blocks: [
+      { image: "/etc/passwd" }, { paywall: true }, { text: "{play}" }, { button: { text: "go", url: "file:///x" } },
+      { repeat: [{ paywall: true }, { link: "javascript:alert(1)" }, { repeat: [] }] },
+      { paywall: true },
+    ],
+  }), (e: Error) => {
+    for (const p of ["an image is an https", "{play} isn't available here", "a paywall can't repeat", "a link starts with",
+      "repeat sections can't nest", "only one paywall", "a button's url starts with https"]) {
+      assert.match(e.message, new RegExp(p.replace(/[{}]/g, "\\$&")));
+    }
+    return true;
+  });
+  assert.throws(() => checkTemplate({ name: "y", needs: "videos", blocks: [{ text: "hi" }] }), /add a repeat section/);
+  const path = job("paywall-free", ["a.mp4"], { template: "pw", videos: ["a.mp4"], post: { title: "t", access: "public" } });
+  saveTemplate({ name: "pw", needs: "videos", blocks: [{ paywall: true }, { repeat: [{ link: "{play}" }] }] });
+  assert.throws(() => loadJob(path), /has a paywall, which needs paid access/);
 });
 
 test("post doc is the source of truth: hand edits kept, never overwritten or sent stale", async () => {

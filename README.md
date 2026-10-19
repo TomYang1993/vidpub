@@ -23,7 +23,8 @@ cp .env.example .env   # fill in BUNNY_LIBRARY_ID + BUNNY_API_KEY (not needed fo
 
 ## Use
 
-A batch is a job file. Paths are relative to the job file, and `~/` works. Pick a template:
+A batch is a job file. Paths are relative to the job file, and `~/` works. Pick a template, a built-in or
+one of yours (see [Templates](#templates)):
 
 | Template | Post body | Example |
 |---|---|---|
@@ -32,22 +33,58 @@ A batch is a job file. Paths are relative to the job file, and `~/` works. Pick 
 
 | Field | |
 |---|---|
-| `template` | required when there's a post |
-| `videos` | for `video-previews`; uploaded and shown in this order |
-| `images` | for `image-gallery`; shown in this order |
+| `template` | required when there's a post: a built-in or a saved template's id |
+| `videos` | for a template that repeats over videos; uploaded and shown in this order |
+| `images` | for one that repeats over images; shown in this order |
 | `collection` | Bunny collection; omit to upload outside any collection |
 | `post.title`, `post.access` | required. Access: `"public"`, `"patrons"`, `"paid"` or a list of tier names |
-| `post.text` | paragraph(s) on top; URLs become links |
+| `post.text` | fills the template's `{text}`; URLs become links |
 | `post.thumbnail`, `post.attachments` | file paths |
 | `post.collection` | Patreon collection (not the Bunny one) |
 | `post.publishNow` | `patreon_browser` only: `true` publishes, default leaves a draft to review |
 | `publish` | `patreon_manual` and/or `patreon_browser`; default `["patreon_manual"]` when there's a post |
 
 **The post file is the source of truth.** The template writes `<job>.post.json`: the post settings plus a list of
-blocks (`{ "text" }`, `{ "image" }` as a URL or file path, `{ "link" }`). Publishers send exactly that. Edit it by
-hand to change the post; reruns keep your edits. If you change the job after hand-editing the post file, the run
+blocks (`{ "text" }`, `{ "image" }` as a URL or file path, `{ "link" }`, `{ "button": { "text", "url", "caption" } }`,
+`{ "divider": true }`, `{ "paywall": true }`). Publishers send exactly that. Edit it by hand to change the post;
+reruns keep your edits. If you change the job after hand-editing the post file, the run
 stops rather than overwrite your edits or send a stale post: delete the post file to rebuild it, or undo the change.
 Jobs from before templates (`post.content` with `{links}`/`{previews}`) fail with the equivalent to use instead.
+
+## Templates
+
+A template is a post layout you build once and reuse: a list of blocks plus **repeat sections**, whose blocks come
+out once per video (or image), in order. Built-ins are `video-previews` and `image-gallery`; yours are saved in
+`~/.vidpub/templates/<id>.json` (one with a built-in's id replaces it). Build them in the GUI (New job → Template →
+Edit or ＋ New template opens the editor): add blocks and repeat sections, drag them or use ↑ ↓, and watch the
+**On Patreon** view render the post with the files in your folder.
+
+| Block | On Patreon | Where |
+|---|---|---|
+| Text | paragraphs; URLs become links | anywhere |
+| Image | `{preview}` (the video's animated WebP), `{file}` (the image) or an https URL | anywhere; `{preview}`/`{file}` in a repeat |
+| Link | a URL on its own line | anywhere |
+| Button | Patreon's button block: text (≤ 35), link, optional description (≤ 140) | anywhere |
+| Divider | a line | anywhere |
+| Paywall | "Paid access starts here": what's above it is free | once, not in a repeat; needs paid access |
+
+Variables: `{text}` (the job's `post.text`) and `{count}` anywhere; in a repeat section `{name}`, `{n}`, plus
+`{preview}` `{play}` for videos or `{file}` for images. A template is only the layout: title, access and
+collections are the job's.
+
+```json
+{
+  "name": "Member videos", "needs": "videos",
+  "blocks": [
+    { "text": "{text}" },
+    { "paywall": true },
+    { "repeat": [{ "image": "{preview}" }, { "button": { "text": "▶ Play", "url": "{play}", "caption": "{name}" } }, { "divider": true }] }
+  ]
+}
+```
+
+A paid post always gets exactly one paywall: where the template (or the preview) puts it, else at the top, so
+everything is locked. Patreon's Audio and Attachments blocks aren't template blocks; attachments are a post setting.
 
 ```bash
 caffeinate -i node vidpub.ts ~/Videos/2026-10/job.json   # caffeinate keeps the Mac awake
@@ -66,12 +103,17 @@ caffeinate -i npm run ui   # opens http://127.0.0.1:<port>/?t=<token> in your br
 
 The same flow without writing `job.json` by hand, in two steps:
 
-1. Pick a folder (native macOS dialog; videos upload straight from it, nothing is copied), choose the post type,
+1. Pick a folder (native macOS dialog; videos upload straight from it, nothing is copied), pick a template,
    tick and order the files (drag, or ↑ ↓), fill in the post, press Start. It writes `job.json` into that folder in
    the format above, uploads the videos with live progress (upload %, encoding, re-uploads) and builds
    `<job>.post.json`. Nothing is sent yet.
-2. The **post preview** shows that file block by block (text, preview images, links). Edit the title and text,
-   save, then **Send to Patreon**: the publishers send exactly that file and the draft link appears.
+2. The **post preview** shows that file the way Patreon will. Edit the title and text, add or move the paywall
+   (↑ ↓ or drag), save, then **Send to Patreon**: the publishers send exactly that file and the draft link appears.
+
+"Who can see it" and "Patreon collection" list your real tiers and collections: **↻ Read tiers and collections
+from Patreon** opens Chrome on the post editor for about 15 s and caches them in `~/.vidpub/patreon.json`. It reuses
+one draft titled "vidpub scratch…" every time; leave that draft alone (deleting it just means the next read makes a
+new one).
 
 `node vidpub.ts <folder>/job.json` reruns a GUI job, and a CLI-made `job.json` opens in the GUI. **Jobs** lists
 the jobs in folders you've picked, including ones built and waiting for review.
@@ -99,8 +141,9 @@ publishers work around that:
 
 - **`patreon_manual`** copies the content to your clipboard and writes `<job>.patreon.txt`: the content plus a
   checklist (title, thumbnail, access, collection, attachments) to apply in the editor yourself.
-- **`patreon_browser`** fills in Patreon's web editor for you: thumbnail (as the post's cover image), title,
-  the blocks (text, links, images: URLs inserted by URL, files uploaded), attachments, access, collection. It leaves a **draft** and prints its URL. Set
+- **`patreon_browser`** fills in Patreon's web editor for you: access, thumbnail (as the post's cover image), title,
+  the blocks (text, links, images: URLs inserted by URL, files uploaded; buttons, dividers, the paywall), attachments,
+  collection. It checks every block came out in order, then leaves a **draft** and prints its URL. Set
   `post.publishNow: true` to publish instead. `post.access` is required, so links never go out public by
   accident.
 
@@ -146,12 +189,14 @@ image. If your library blocks direct file access or limits allowed domains, make
 ## Extending
 
 - **New destination** (Discord, email, another platform): add a `Publisher` to `publishers.ts`, register it in
-  `PUBLISHERS`, and list it in the job's `publish`. It gets the post plus `[{title, url}]` once all videos
-  are playable.
+  `PUBLISHERS`, and list it in the job's `publish`. A publisher is `(doc: PostDoc, jobPath) => string | Promise<string>`:
+  it gets the post doc and returns a URL or path, which is saved so reruns skip it.
+- **New block type**: add it to `Block` (publishers.ts), `checkBlock`/`expand` (templates.ts), the publishers, the
+  GUI's `KIND`/`pageBlock`/`newBlock`, and `postProblems` (ui/server.ts).
 - **Other Bunny calls**: add them to `bunny.ts`.
 
 ## Check
 
 ```bash
-npm test && npm run typecheck   # no network: TUS resume, retry/replace, give-up, rerun, job validation, GUI job writing + preview edits
+npm test && npm run typecheck   # no network: TUS resume, retry/replace, give-up, rerun, job validation, templates, GUI job writing + preview edits
 ```

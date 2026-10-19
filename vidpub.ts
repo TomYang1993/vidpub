@@ -10,12 +10,13 @@
 // it was hand-edited, in which case the run stops instead of overwriting or sending a stale post.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Bunny, FAILED, HttpError, READY, RETRY_STATUS, VIDEO_TYPES, type Sleep } from "./bunny.ts";
-import { PUBLISHERS, TEMPLATES, type PostDoc, type Publisher, type Video } from "./publishers.ts";
+import { freeAccess, PUBLISHERS, type PostDoc, type Publisher, type Video } from "./publishers.ts";
+import { expand, loadTemplates, type Template } from "./templates.ts";
 
 export const MAX_ATTEMPTS = 3; // fresh uploads per video per run; rerunning is how you ask for more
 const POLL_MS = 30_000;
@@ -76,10 +77,14 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
       publish: raw.publish ?? (raw.post ? ["patreon_manual"] : []),
     };
   }
-  const template = job.template && TEMPLATES[job.template];
-  if (job.template && !template) problems.push(`unknown template: ${job.template} (have: ${Object.keys(TEMPLATES).join(", ")})`);
-  if (job.post && !job.template) problems.push(`a post needs a "template": ${Object.keys(TEMPLATES).join(" or ")}`);
+  const templates = loadTemplates();
+  const template = typeof job.template === "string" && Object.hasOwn(templates, job.template) ? templates[job.template] : undefined;
+  if (job.template && !template) problems.push(`unknown template: ${job.template} (have: ${Object.keys(templates).join(", ")})`);
+  if (job.post && !job.template) problems.push(`a post needs a "template": ${Object.keys(templates).join(" or ")}`);
   if (template && !job[template.needs].length) problems.push(`template ${job.template} needs "${template.needs}"`);
+  if (template && job.post && freeAccess(job.post.access) && template.blocks.some((b) => "paywall" in b)) {
+    problems.push(`template ${job.template} has a paywall, which needs paid access, not "${job.post.access}"`);
+  }
   if (!job.template && !job.videos.length) problems.push("no videos");
   for (const i of job.images) {
     if (!IMAGE_TYPES.has(extname(i).toLowerCase())) problems.push(`not an image: ${i}`);
@@ -114,14 +119,17 @@ const statePath = (job: Job) => `${job.path}.state.json`;
 export const postPath = (job: Job) => `${job.path}.post.json`;
 const readJson = <T>(path: string): T | undefined => (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined);
 function writeJson(path: string, data: unknown) {
-  writeFileSync(`${path}.tmp`, JSON.stringify(data, null, 2));
+  rmSync(`${path}.tmp`, { force: true }); // never write through a symlink planted at the temp name
+  writeFileSync(`${path}.tmp`, JSON.stringify(data, null, 2), { flag: "wx" });
   renameSync(`${path}.tmp`, path); // atomic: a crash never leaves a half-written file
 }
 const readState = (job: Job): State => readJson<State>(statePath(job)) ?? { videos: {}, published: {} };
 const hash = (x: unknown) => createHash("sha256").update(JSON.stringify(x)).digest("hex").slice(0, 16);
-/** Everything the post is built from. Videos count by Bunny guid, so a re-upload means a rebuild. */
+const templateOf = (job: Job): Template => loadTemplates()[job.template!];
+/** Everything the post is built from, the template's layout included. Videos count by Bunny guid, so a re-upload
+ *  means a rebuild. */
 const inputsHash = (job: Job, state: State) =>
-  hash([job.template, job.post, job.images, job.videos.map((v) => state.videos[v]?.guid ?? null)]);
+  hash([job.template, templateOf(job), job.post, job.images, job.videos.map((v) => state.videos[v]?.guid ?? null)]);
 
 /**
  * Build <job>.post.json from the template, or keep it if the job hasn't changed (hand edits survive).
@@ -135,7 +143,7 @@ export function buildPost(job: Job, videos: Video[]): PostDoc {
     throw new Error(`${postPath(job)} was edited by hand, and the job changed since. Delete it to rebuild from the job, or undo the job change.`);
   }
   const { text, ...settings } = job.post!;
-  const doc: PostDoc = { ...settings, blocks: TEMPLATES[job.template!].build(text, { videos, images: job.images }) };
+  const doc: PostDoc = { ...settings, blocks: expand(templateOf(job), text, { videos, images: job.images }) };
   writeJson(postPath(job), { inputs, built: hash(doc), doc } satisfies DocFile);
   return doc;
 }
