@@ -318,6 +318,10 @@ export function serve(opts: {
   function start(dir: string, form: Form | null, rebuild: boolean) {
     busyWith(join(dir, "job.json")); // before writing: a queued job's job.json must not change under it
     const job = form ? writeJob(dir, form, publishers) : loadJob(join(dir, "job.json"), publishers);
+    if (!form) { // the saved job.json may have come with a downloaded folder: only upload files that are in it
+      const problems = postProblems(dir, job, { title: "", access: "", blocks: [] });
+      if (problems.length) throw fail(400, `Not starting:\n${problems.join("\n")}`);
+    }
     const env = readEnv();
     if (job.videos.length && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
       throw fail(400, "Saved job.json. Add your Bunny library ID and API key in Settings, then Start.");
@@ -345,7 +349,12 @@ export function serve(opts: {
     }
     const cur = begin(dir, job, "publish");
     enqueue(cur, async () => {
-      await publishPost(job, publishers, track(cur, job).onEvent);
+      // checked again now: the files may have changed while this waited in the queue
+      const now = readPost(dir);
+      if (!now.job || !now.doc) throw new Error("the post file is gone: press Start again");
+      const later = postProblems(dir, now.job, now.doc);
+      if (later.length) throw new Error(`Not sending:\n${later.join("\n")}`);
+      await publishPost(now.job, publishers, track(cur, now.job).onEvent);
       return "post sent";
     });
   }

@@ -126,6 +126,11 @@ test("queue: one step at a time, a job is never queued twice, only queued steps 
     assert.deepEqual(q.map((x) => [x.dir, x.state]), [[a, "done"], [b, "done"]]);
     assert.deepEqual(uploads, [join(a, "a.mp4"), join(b, "b.mp4")]); // in order, never two at once
     assert.ok(existsSync(join(a, "job.json.post.json")) && !existsSync(join(c, "job.json.post.json"))); // c never ran
+    // a rebuild from a saved job.json that points outside its folder is refused before anything is queued
+    writeFileSync(join(c, "job.json"), JSON.stringify({ ...form("c"), videos: [join(a, "a.mp4")] }));
+    const res = await post("/api/start", { dir: c, rebuild: true });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /outside/);
   } finally {
     server.close();
     server.closeAllConnections();
