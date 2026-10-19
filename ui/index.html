@@ -67,8 +67,6 @@
 
   .errors { color: var(--bad); white-space: pre-wrap; margin-top: 12px; }
   .errors:empty { display: none; }
-  #run-state { font-weight: 600; }
-  #run-state.ok { color: var(--ok); } #run-state.bad { color: var(--bad); }
   .vrow { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 120px; gap: 12px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
   .vrow:first-child { border-top: 0; }
   .vrow .label { color: var(--muted); }
@@ -139,6 +137,13 @@
   .pwall button { padding: 0 7px; line-height: 22px; font-size: 12px; }
   .tierlist .check { margin: 4px 0; }
   .warn { color: var(--bad); }
+  .notice { background: var(--card); border: 1px solid var(--ok); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+  .qentry { border-top: 1px solid var(--line); padding: 12px 0 4px; }
+  .qentry:first-child { border-top: 0; }
+  .qhead { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .qhead .qname { font-weight: 600; overflow-wrap: anywhere; }
+  .qhead .qact { margin-left: auto; display: flex; gap: 6px; }
+  .qhead .qact button { padding: 2px 10px; font-size: 13px; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; font-weight: 550; color: var(--muted); font-size: 12px; padding: 0 8px 8px 0; }
   td { padding: 9px 8px 9px 0; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
@@ -162,15 +167,7 @@
 </header>
 <main>
   <div id="tab-new">
-    <section class="card" id="progress" hidden aria-live="polite">
-      <div class="row" style="justify-content: space-between"><h2 style="margin: 0">Progress</h2><span id="run-state"></span></div>
-      <p class="hint" id="run-job" style="margin: 4px 0 10px"></p>
-      <div id="rows"></div>
-      <div class="pubs" id="pubs"></div>
-      <details id="links-box" hidden><summary>Play links</summary><ol class="links" id="links"></ol></details>
-      <button type="button" id="rebuild" style="margin-top: 12px" hidden>Discard my post edits and rebuild</button>
-      <details><summary>Log</summary><pre class="log" id="log"></pre></details>
-    </section>
+    <div class="notice" id="queued-note" role="status" hidden></div>
 
     <section class="card" id="preview" hidden>
       <h2 style="margin: 0">Post preview</h2>
@@ -279,6 +276,11 @@
   </div>
 
   <div id="tab-jobs" hidden>
+    <section class="card" id="queue-card" hidden aria-live="polite">
+      <h2>Queue</h2>
+      <p class="hint" style="margin: -6px 0 4px">One step runs at a time; the rest wait their turn. Closing this tab doesn't stop anything: it runs in the terminal (Ctrl+C there stops it, and Start again resumes).</p>
+      <div id="queue"></div>
+    </section>
     <section class="card">
       <h2>Jobs</h2>
       <p class="hint" id="jobs-empty" hidden>No jobs yet in the folders you've picked.</p>
@@ -430,6 +432,7 @@ $("refresh").onclick = async () => {
 
 function setFolder(f) {
   folder = f;
+  $("queued-note").hidden = true;
   const saved = f.job;
   for (const [key, kind] of [["videos", "video"], ["images", "image"]]) {
     const all = f.files.filter((x) => x.kind === kind);
@@ -582,22 +585,23 @@ function form() {
 }
 
 function updateStart() {
-  const running = !!live?.running;
+  const busy = !!folder && !!active(folder.dir);
   const any = items().some((v) => v.on);
   const post = needs() === "images" || $("post-on").checked;
-  $("start").disabled = !folder || running || !any;
+  $("start").disabled = !folder || busy || !any;
   $("start").textContent = needs() === "images" ? "Build the post" : post ? "Upload and build the post" : "Upload";
-  $("start-hint").textContent = running ? "Something is running." : !folder ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.`
-    : `Saves job.json in the folder${post ? ". You review the post before anything is sent." : "."}`;
-  $("p-send").disabled = running;
+  $("start-hint").textContent = busy ? "This folder's job is queued or running: see Jobs." : !folder ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.`
+    : `Saves job.json in the folder and adds it to the queue${post ? ". You review the post before anything is sent." : "."}`;
+  $("p-send").disabled = busy;
 }
 
-async function start(rebuild = false) {
+async function start() {
   $("errors").textContent = "";
   $("start").disabled = true;
   try {
-    await api("/api/start", { dir: folder.dir, form: form(), rebuild });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    const name = folder.dir.split("/").pop();
+    await api("/api/start", { dir: folder.dir, form: form() });
+    resetNewJob(`Queued: ${name}. When it's built, open it from Jobs to review and send.`);
   } catch (e) {
     $("errors").textContent = `Can't start yet:\n${e.message}`;
   } finally {
@@ -605,30 +609,71 @@ async function start(rebuild = false) {
   }
 }
 $("start").onclick = () => start();
-$("rebuild").onclick = () => start(true);
 
-// ---- progress (Server-Sent Events: the server sends the whole run state on every change)
-let live = null;
+/** Back to a blank job once one is queued, so the next one can be set up while it runs. */
+function resetNewJob(note) {
+  folder = null;
+  lists.videos = [];
+  lists.images = [];
+  for (const id of ["title", "text", "collection"]) $(id).value = "";
+  setAccess("access", "tiers", "");
+  setCollection("pcollection", "");
+  $("thumbnail").replaceChildren(el("option", { value: "", textContent: "None" }));
+  $("attachments").replaceChildren();
+  $("attachments-box").hidden = true;
+  $("publish-draft").checked = true;
+  $("folder").textContent = "Pick the folder your files are in. Videos upload straight from there; nothing is copied.";
+  $("recent").value = "";
+  preview = null;
+  renderPreview();
+  renderItems();
+  syncPost();
+  $("queued-note").replaceChildren(`${note} `, el("button", { type: "button", className: "linkish", textContent: "Open Jobs", onclick: () => show("jobs") }));
+  $("queued-note").hidden = false;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+// ---- queue (Server-Sent Events: the server sends the whole queue on every change)
+let queue = []; // [{ id, dir, jobPath, step, state, result, error, videos, publish, links, log }]
+const active = (dir) => queue.find((q) => q.dir === dir && (q.state === "queued" || q.state === "running"));
 const events = new EventSource(`/events?t=${encodeURIComponent(token)}`);
 events.onmessage = (e) => {
-  const was = live?.running;
-  live = JSON.parse(e.data);
-  renderLive();
+  const before = new Map(queue.map((q) => [q.id, q.state]));
+  queue = JSON.parse(e.data).queue;
+  renderQueue();
   updateStart();
-  if (was && !live.running && folder?.dir === live.dir) loadPreview(); // a step just ended: show the post as saved
+  const changed = queue.filter((q) => before.get(q.id) !== q.state);
+  if (folder && changed.some((q) => q.dir === folder.dir && (q.state === "done" || q.state === "failed"))) loadPreview(); // show the post as saved
+  if (changed.length && !$("tab-jobs").hidden) loadJobs().catch(() => {});
 };
 const pubRow = (p) => el("div", { className: "pub" },
   el("b", { textContent: p.name }),
   p.result ? link(p.result, /\/edit$/.test(p.result) ? `Open the draft: ${p.result}` : p.result)
     : el("span", { className: "hint", textContent: p.running ? "working…" : "not sent yet" }));
 
-function renderLive() {
-  $("progress").hidden = !live;
-  if (!live) return;
-  $("run-state").textContent = live.running ? "Running" : live.error ? "Stopped" : "Done";
-  $("run-state").className = live.running ? "" : live.error ? "bad" : "ok";
-  $("run-job").textContent = live.jobPath;
-  $("rows").replaceChildren(...live.videos.map((v) => {
+const openState = new Map(); // queue entry id -> details open, so re-renders keep what you expanded
+function renderQueue() {
+  const live = queue.filter((q) => q.state === "running" || q.state === "queued");
+  const finished = queue.filter((q) => !live.includes(q)).reverse(); // newest first
+  $("queue-card").hidden = !queue.length;
+  document.querySelector('nav button[data-tab="jobs"]').textContent = live.length ? `Jobs (${live.length})` : "Jobs";
+  $("queue").replaceChildren(...[...live, ...finished].map((q) => queueEntry(q, live.indexOf(q))));
+}
+
+function queueEntry(q, pos) {
+  const name = q.dir.split("/").pop();
+  const [tag, cls] = { queued: [`queued${pos > 0 ? ` · ${pos} ahead` : ""}`, ""], running: ["running", "run"], done: ["done", "ok"], failed: ["failed", "bad"] }[q.state];
+  const act = (text, fn) => el("button", { type: "button", textContent: text, onclick: () => fn().catch((e) => alert(e.message)) });
+  const actions = [
+    q.state === "queued" && act("Cancel", () => api("/api/cancel", { id: q.id })),
+    q.state === "done" && q.step === "upload" && queue.findLast((x) => x.dir === q.dir) === q && act("Review and send", async () => {
+      await openFolder(q.dir);
+      show("new");
+      $("preview").scrollIntoView({ behavior: "smooth" });
+    }),
+    q.state === "failed" && /edited by hand/.test(q.error ?? "") && act("Discard my post edits and rebuild", () => api("/api/start", { dir: q.dir, rebuild: true })),
+  ].filter(Boolean);
+  const rows = q.videos.map((v) => {
     const ready = v.status === 4 || v.status === 8;
     const bad = v.status === 5 || v.status === 6 || v.status === null;
     const busy = !ready && !bad && v.status != null;
@@ -637,17 +682,25 @@ function renderLive() {
       el("span", { className: "name", textContent: v.name }),
       el("span", { className: "label", textContent: v.pct != null && v.pct < 100 && v.status == null ? `${v.label} ${v.pct}%` : v.label }),
       el("div", { className: "bar" }, el("i", { style: `transform: scaleX(${width / 100})` })));
-  }));
-  $("pubs").replaceChildren(
-    ...(live.step === "publish" ? live.publish.map(pubRow) : []),
-    ...(live.error ? [el("div", { className: "pub errors", textContent: `${live.error}\n\nFix it and try again: finished uploads are kept.` })] : []));
-  $("rebuild").hidden = live.running || !/edited by hand/.test(live.error ?? "");
-  $("links-box").hidden = !live.links.length;
-  $("links").replaceChildren(...live.links.map((v) => el("li", {}, `${v.title}: `, link(v.url))));
-  const log = $("log");
-  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
-  log.textContent = live.log.join("\n");
-  if (atEnd) log.scrollTop = log.scrollHeight;
+  });
+  const log = el("pre", { className: "log", textContent: q.log.join("\n") || "Nothing yet." });
+  const details = el("details", { open: openState.get(q.id) ?? q.state === "running" },
+    el("summary", { textContent: q.state === "queued" ? "Details" : "Progress" }),
+    el("div", { style: "margin-top: 8px" }, ...rows),
+    q.links.length ? el("details", {}, el("summary", { textContent: "Play links" }), el("ol", { className: "links" }, ...q.links.map((v) => el("li", {}, `${v.title}: `, link(v.url))))) : null,
+    el("details", {}, el("summary", { textContent: "Log" }), log));
+  details.addEventListener("toggle", () => openState.set(q.id, details.open));
+  queueMicrotask(() => (log.scrollTop = log.scrollHeight));
+  return el("div", { className: "qentry" },
+    el("div", { className: "qhead" },
+      el("span", { className: "qname", textContent: name }),
+      el("span", { className: "hint", textContent: q.step === "upload" ? "upload and build" : "send to Patreon" }),
+      el("span", { className: `tag ${cls}`, textContent: tag }),
+      el("span", { className: "qact" }, ...actions)),
+    q.result && q.state === "done" ? el("p", { className: "hint", style: "margin: 4px 0 0", textContent: q.result }) : null,
+    q.step === "publish" ? el("div", { className: "pubs" }, ...q.publish.map(pubRow)) : null,
+    q.error ? el("div", { className: "errors", textContent: `${q.error}\n\nFix it and Start again: finished uploads are kept.` }) : null,
+    details);
 }
 
 // ---- post preview: <job>.post.json as saved, which is exactly what gets sent
@@ -749,9 +802,9 @@ $("p-send").onclick = async () => {
   if (preview.doc.publishNow && !confirm("Publish this post now? Members get notified.")) return;
   try {
     if (!$("p-save").disabled) await savePreview(); // send what's on screen
+    const name = folder.dir.split("/").pop();
     await api("/api/publish", { dir: folder.dir });
-    $("p-status").textContent = "Sending…";
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    resetNewJob(`Queued: send ${name} to Patreon. The draft link shows up in Jobs.`);
   } catch (e) {
     $("p-status").textContent = e.message;
   }
@@ -1008,7 +1061,7 @@ async function loadJobs() {
   $("jobs-table").hidden = !jobs.length;
   $("jobs").replaceChildren(...jobs.map((j) => {
     const published = j.publish.length > 0 && j.publish.every((p) => j.published[p]);
-    const [text, cls] = j.running ? ["running", "run"] : j.error ? ["failed", "bad"] : published || (!j.publish.length && j.uploaded === j.videos) ? ["done", "ok"]
+    const [text, cls] = j.running ? ["running", "run"] : j.queued ? ["queued", ""] : j.error ? ["failed", "bad"] : published || (!j.publish.length && j.uploaded === j.videos) ? ["done", "ok"]
       : j.built ? ["ready to review", "run"] : ["unfinished", ""];
     const results = Object.entries(j.published).map(([name, r]) => el("div", {}, `${name}: `, link(r, /\/edit$/.test(r) ? "draft" : r)));
     const open = el("button", { type: "button", textContent: "Open", onclick: () => openFolder(j.dir).then(() => show("new"), (e) => alert(e.message)) });

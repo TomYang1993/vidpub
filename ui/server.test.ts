@@ -1,10 +1,10 @@
 // No network: npm test
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { applyEdits, listFolder, postProblems, writeJob } from "./server.ts";
+import { applyEdits, listFolder, postProblems, serve, writeJob } from "./server.ts";
 
 process.env.VIDPUB_TEMPLATES = mkdtempSync(join(tmpdir(), "vidpub-tpl-")); // never the user's own saved templates
 
@@ -81,4 +81,53 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
   symlinkSync(elsewhere, join(dir, ".job.draft.json")); // planted
   writeJob(dir, { template: "image-gallery", images: ["a.png"], post: { title: "t", access: "public" }, publish: ["p"] }, { p: () => "" });
   assert.equal(readFileSync(elsewhere, "utf8"), "secret");
+});
+
+test("queue: one step at a time, a job is never queued twice, only queued steps cancel, the next one runs after", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-q-")));
+  const [a, b, c] = ["a", "b", "c"].map((n) => (mkdirSync(join(root, n)), writeFileSync(join(root, n, `${n}.mp4`), "x"), join(root, n)));
+  writeFileSync(join(root, "ui.json"), JSON.stringify({ folders: [a, b, c] }));
+  writeFileSync(join(root, "env"), "BUNNY_LIBRARY_ID=1\nBUNNY_API_KEY=k\n");
+  let release!: () => void;
+  const gate = new Promise<void>((ok) => (release = ok)); // holds the first upload until the checks are done
+  const uploads: string[] = [];
+  const done = new Set<string>(); // Bunny says "ready" once a video is uploaded
+  const makeHost = () => ({
+    findOrCreateCollection: async () => "col", createVideo: async (t: string) => `g-${t}`, deleteVideo: async () => {},
+    status: async (g: string) => (done.has(g) ? 4 : null), tusCreate: async () => "tus",
+    tusUpload: async (p: string, g: string) => (uploads.push(p), await gate, done.add(g), true),
+    playUrl: (g: string) => `https://play/${g}`, previewUrl: async () => undefined,
+  });
+  const { server, url } = await serve({
+    recentFile: join(root, "ui.json"), envFile: join(root, "env"), chooseFolder: async () => null,
+    makeHost: makeHost as never, publishers: { patreon_browser: () => "https://draft" }, patreonCache: () => null,
+  });
+  const { origin, searchParams } = new URL(url);
+  const headers = { "x-vidpub-token": searchParams.get("t")!, origin, "content-type": "application/json" };
+  const post = (path: string, body: object) => fetch(`${origin}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  const queue = async () => { // the first message on /events is the whole queue
+    const res = await fetch(`${origin}/events`, { headers });
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    return JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")).queue as { id: number; dir: string; state: string }[];
+  };
+  const form = (n: string) => ({ template: "video-previews", videos: [`${n}.mp4`], post: { title: n, access: "paid" }, publish: ["patreon_browser"] });
+  try {
+    for (const [dir, n] of [[a, "a"], [b, "b"], [c, "c"]]) assert.equal((await post("/api/start", { dir, form: form(n) })).status, 200);
+    assert.equal((await post("/api/start", { dir: b, form: form("b") })).status, 409); // already queued
+    let q = await queue();
+    assert.deepEqual(q.map((x) => x.state), ["running", "queued", "queued"]);
+    assert.equal((await post("/api/cancel", { id: q[0].id })).status, 409); // running: can't cancel
+    assert.equal((await post("/api/cancel", { id: q[2].id })).status, 200);
+    assert.equal((await post("/api/post/save", { dir: a, title: "x" })).status, 400); // nothing built yet
+    release();
+    for (let i = 0; i < 100 && (q = await queue()).some((x) => x.state !== "done"); i++) await new Promise((ok) => setTimeout(ok, 20));
+    assert.deepEqual(q.map((x) => [x.dir, x.state]), [[a, "done"], [b, "done"]]);
+    assert.deepEqual(uploads, [join(a, "a.mp4"), join(b, "b.mp4")]); // in order, never two at once
+    assert.ok(existsSync(join(a, "job.json.post.json")) && !existsSync(join(c, "job.json.post.json"))); // c never ran
+  } finally {
+    server.close();
+    server.closeAllConnections();
+  }
 });

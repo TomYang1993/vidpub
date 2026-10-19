@@ -30,10 +30,13 @@ export type Form = {
 };
 type Env = Record<string, string | undefined>;
 type Row = { name: string; label: string; pct: number | null; status?: number | null };
+/** One step of one job in the queue: "upload" = upload the videos and build the post; "publish" = send it. */
 type Live = {
-  dir: string; jobPath: string; step: "upload" | "publish"; running: boolean; error?: string;
+  id: number; dir: string; jobPath: string; step: "upload" | "publish"; state: "queued" | "running" | "done" | "failed";
+  added: number; result?: string; error?: string;
   videos: Row[]; publish: { name: string; running: boolean; result?: string }[]; links: Video[]; log: string[];
 };
+const FINISHED_KEPT = 20; // finished steps the Jobs tab still shows
 
 const IMAGE_MIME: Record<string, string> = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif" };
 const DRAFT = ".job.draft.json"; // validated here before it may replace job.json
@@ -181,13 +184,24 @@ export function serve(opts: {
   const page = readFileSync(join(import.meta.dirname, "index.html"));
   const token = Buffer.from(randomBytes(32).toString("base64url"));
   let recent: string[] = existsSync(recentFile) ? JSON.parse(readFileSync(recentFile, "utf8")).folders : [];
-  let live: Live | null = null;
+  // ponytail: one worker runs the queue one step at a time. Uploads share the uplink anyway, and the Patreon profile
+  // can only be open in one Chrome. Parallel steps would need per-step logs and a profile lock.
+  let queue: Live[] = [];
+  let nextId = 1;
+  let busy = false;
+  const works = new Map<number, () => Promise<string>>();
   const clients = new Set<ServerResponse>();
 
   const readEnv = (): Env => ({ ...process.env, ...(existsSync(envFile) ? parseEnv(readFileSync(envFile, "utf8")) : {}) });
   const fail = (status: number, msg: string) => Object.assign(new Error(msg), { status });
   const push = () => {
-    for (const c of clients) c.write(`data: ${JSON.stringify(live)}\n\n`);
+    for (const c of clients) c.write(`data: ${JSON.stringify({ queue })}\n\n`);
+  };
+
+  /** The job's queued or running step, if any: a job is never in the queue twice. */
+  const active = (jobPath: string) => queue.find((q) => q.jobPath === jobPath && (q.state === "queued" || q.state === "running"));
+  const busyWith = (jobPath: string) => {
+    if (active(jobPath)) throw fail(409, `${basename(dirname(jobPath))} is already queued or running: see Jobs`);
   };
 
   function picked(dir: unknown) {
@@ -210,28 +224,26 @@ export function serve(opts: {
         const state = read(`${jobPath}.state.json`) ?? {};
         const raw = extname(jobPath) === ".json" ? read(jobPath) ?? {} : { videos: [jobPath] }; // CLI single-video run
         const paths: string[] = (raw.videos ?? []).map((p: string) => resolve(dir, p.replace(/^~(?=\/)/, homedir())));
-        const mine = live?.jobPath === jobPath ? live : null;
+        const mine = queue.findLast((q) => q.jobPath === jobPath);
         return {
           dir, job: basename(jobPath), mtime: statSync(existsSync(`${jobPath}.state.json`) ? `${jobPath}.state.json` : jobPath).mtimeMs,
           videos: paths.length, uploaded: paths.filter((p) => state.videos?.[p]?.guid).length, images: raw.images?.length ?? 0,
           publish: raw.publish ?? [], published: state.published ?? {}, built: existsSync(`${jobPath}.post.json`),
-          running: !!mine?.running, error: mine?.error,
+          queued: mine?.state === "queued", running: mine?.state === "running", error: mine?.state === "failed" ? mine.error : undefined,
         };
       });
     }).sort((a, b) => b.mtime - a.mtime);
   }
 
-  /** A fresh `live` for one step on a job, rows and earlier publisher results filled in from its state. */
+  /** A queue entry for one step on a job, rows and earlier publisher results filled in from its state. */
   function begin(dir: string, job: Job, step: Live["step"]): Live {
     const statePath = `${job.path}.state.json`;
     const prev = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { videos: {}, published: {} };
-    live = {
-      dir, jobPath: job.path, step, running: true, links: [], log: [],
-      videos: step === "upload" ? job.videos.map((v) => ({ name: basename(v), label: prev.videos[v]?.guid ? "on Bunny from a past run" : "queued", pct: null })) : [],
+    return {
+      id: nextId++, dir, jobPath: job.path, step, state: "queued", added: Date.now(), links: [], log: [],
+      videos: step === "upload" ? job.videos.map((v) => ({ name: basename(v), label: prev.videos[v]?.guid ? "on Bunny from a past run" : "waiting", pct: null })) : [],
       publish: job.publish.map((name) => ({ name, running: false, result: prev.published[name] })),
     };
-    push();
-    return live;
   }
 
   /** Engine progress -> `live`. */
@@ -256,40 +268,64 @@ export function serve(opts: {
     return { onEvent, onUpload };
   }
 
-  /** Run a step in the background: the request returns now, progress goes out over /events. */
-  function background(cur: Live, work: () => Promise<string>) {
-    // ponytail: mirror the engine's console into the page's log instead of threading a logger through it.
-    // Global, so fine for one step at a time (callers refuse a second one).
+  /** Queue a step: the request returns now, the worker runs it in turn, progress goes out over /events. */
+  function enqueue(cur: Live, work: () => Promise<string>) {
+    queue.push(cur);
+    works.set(cur.id, work);
+    push();
+    pump();
+  }
+
+  /** Start the next queued step unless one is running. */
+  function pump() {
+    if (busy) return;
+    const cur = queue.find((q) => q.state === "queued");
+    if (!cur) return;
+    if (cur.step === "publish" && readingPatreon) return void setTimeout(pump, 1000); // Chrome is reading tiers
+    busy = true;
+    cur.state = "running";
+    // ponytail: mirror the engine's console into the step's log instead of threading a logger through it.
+    // Global, so fine with one step at a time.
     const log = console.log;
     console.log = (...a: unknown[]) => {
       log(...a);
       cur.log = [...cur.log.slice(-299), a.join(" ")];
       push();
     };
-    work()
-      .then((done) => notify(`${basename(cur.dir)}: ${done}`), (e: Error) => {
-        cur.error = e.message;
+    push();
+    works.get(cur.id)!()
+      .then((done) => {
+        Object.assign(cur, { state: "done", result: done });
+        notify(`${basename(cur.dir)}: ${done}`);
+      }, (e: Error) => {
+        Object.assign(cur, { state: "failed", error: e.message });
         notify(`${basename(cur.dir)} failed: ${e.message}`);
       })
       .finally(() => {
         console.log = log;
-        cur.running = false;
+        works.delete(cur.id);
+        busy = false;
+        const finished = queue.filter((q) => q.state === "done" || q.state === "failed");
+        const drop = new Set(finished.slice(0, Math.max(0, finished.length - FINISHED_KEPT)));
+        queue = queue.filter((q) => !drop.has(q));
         push();
+        pump();
       });
   }
 
-  /** Step 1: save job.json, upload the videos (if any) and build <job>.post.json for review. Nothing is published. */
-  function start(dir: string, form: Form, rebuild: boolean) {
-    if (live?.running) throw fail(409, "something is already running");
-    const job = writeJob(dir, form, publishers);
+  /** Step 1: save job.json (form = null: keep the saved one), upload the videos (if any) and build <job>.post.json
+   *  for review. Nothing is published. */
+  function start(dir: string, form: Form | null, rebuild: boolean) {
+    busyWith(join(dir, "job.json")); // before writing: a queued job's job.json must not change under it
+    const job = form ? writeJob(dir, form, publishers) : loadJob(join(dir, "job.json"), publishers);
     const env = readEnv();
     if (job.videos.length && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
       throw fail(400, "Saved job.json. Add your Bunny library ID and API key in Settings, then Start.");
     }
     const cur = begin(dir, job, "upload");
     const { onEvent, onUpload } = track(cur, job);
-    background(cur, async () => {
-      const videos = job.videos.length ? await uploadVideos(job, makeHost(env, onUpload), undefined, onEvent) : [];
+    enqueue(cur, async () => {
+      const videos = job.videos.length ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : [];
       if (!job.post) return "videos are ready";
       if (rebuild) rmSync(postPath(job), { force: true }); // the page asked to drop hand edits the job no longer matches
       buildPost(job, videos);
@@ -299,7 +335,7 @@ export function serve(opts: {
 
   /** Step 2: send <job>.post.json, exactly as saved, to the job's publishers. */
   function publish(dir: string) {
-    if (live?.running || readingPatreon) throw fail(409, "something is already running");
+    busyWith(join(dir, "job.json"));
     const { job, doc } = readPost(dir);
     if (!job || !doc) throw fail(400, "no post yet: press Start first");
     const problems = postProblems(dir, job, doc);
@@ -308,7 +344,7 @@ export function serve(opts: {
       throw fail(400, "Log in to Patreon once first: run node patreon-login.ts in the vidpub folder, then send again.");
     }
     const cur = begin(dir, job, "publish");
-    background(cur, async () => {
+    enqueue(cur, async () => {
       await publishPost(job, publishers, track(cur, job).onEvent);
       return "post sent";
     });
@@ -377,7 +413,7 @@ export function serve(opts: {
         }).end(page);
       } else if (route === "GET /events") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
-        res.write(`data: ${JSON.stringify(live)}\n\n`);
+        res.write(`data: ${JSON.stringify({ queue })}\n\n`);
         clients.add(res);
         req.on("close", () => clients.delete(res));
       } else if (route === "GET /api/session") {
@@ -392,7 +428,7 @@ export function serve(opts: {
         json(res, 200, { templates: Object.values(loadTemplates()) });
       } else if (route === "POST /api/patreon/refresh") {
         // one Chrome on the Patreon profile at a time: it's locked while open
-        if (readingPatreon || (live?.running && live.step === "publish")) throw fail(409, "Chrome is busy with Patreon: try again when it's done");
+        if (readingPatreon || queue.some((q) => q.state === "running" && q.step === "publish")) throw fail(409, "Chrome is busy with Patreon: try again when it's done");
         readingPatreon = true;
         try {
           const { draft, ...patreon } = await readPatreon();
@@ -411,7 +447,15 @@ export function serve(opts: {
         json(res, 200, listFolder(picked((await body(req)).dir)));
       } else if (route === "POST /api/start") {
         const { dir, form, rebuild } = await body(req);
-        start(picked(dir), form, rebuild === true);
+        start(picked(dir), form ?? null, rebuild === true);
+        json(res, 200, { ok: true });
+      } else if (route === "POST /api/cancel") { // only a step that hasn't started: a running one stops with Ctrl+C
+        const id = (await body(req)).id;
+        const cur = queue.find((q) => q.id === id);
+        if (cur?.state !== "queued") throw fail(409, "only a queued step can be cancelled");
+        queue = queue.filter((q) => q !== cur);
+        works.delete(cur.id);
+        push();
         json(res, 200, { ok: true });
       } else if (route === "POST /api/post") {
         const { job, ...post } = readPost(picked((await body(req)).dir));
@@ -420,6 +464,7 @@ export function serve(opts: {
         const edits = await body(req);
         const { doc, job } = readPost(picked(edits.dir));
         if (!doc || !job) throw fail(400, "no post yet: press Start first");
+        busyWith(job.path); // a queued send sends the file as it is when it runs; a running build rewrites it
         savePost(job, applyEdits(doc, edits));
         json(res, 200, { ok: true });
       } else if (route === "POST /api/publish") {
