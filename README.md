@@ -101,22 +101,28 @@ stopped, and failed ones are re-uploaded. Each run allows 3 fresh uploads per vi
 caffeinate -i npm run ui   # opens http://127.0.0.1:<port>/?t=<token> in your browser
 ```
 
-The same flow without writing `job.json` by hand, in two steps:
+The same flow without writing `job.json` by hand, in one go:
 
-1. Pick a folder (native macOS dialog; videos upload straight from it, nothing is copied), pick a template,
-   tick and order the files (drag, or ↑ ↓), fill in the post, press Start. It writes `job.json` into that folder in
-   the format above and adds the job to the **queue**; New job is then free for the next one. The queue uploads the
-   videos and builds `<job>.post.json`. Nothing is sent yet.
-2. In **Jobs**, a built job has **Review and send**: the **post preview** shows that file the way Patreon will. Edit
-   the title and text, add or move the paywall (↑ ↓ or drag), save, then **Send to Patreon** (a draft, or published
-   right away): that's queued too, and the draft link shows up in Jobs.
+1. **New job:** pick a folder (native macOS dialog; videos upload straight from it, nothing is copied), tick and
+   order the files (drag, or ↑ ↓), pick a template, fill in the post, and choose **Save as a draft** or **Publish
+   right away**. Press **Upload and save as a Patreon draft** (or **…publish on Patreon**). It writes `job.json`
+   into the folder and adds the job to the queue; New job is blank again for the next one.
+2. **Jobs:** the job goes queued → uploading → waiting to send → sending → done. It uploads the videos, builds
+   `<job>.post.json` from the template, then sends exactly that to Patreon: Chrome opens and fills in the editor
+   (this needs `node patreon-login.ts` once). Done shows **Open the draft** (Patreon's edit page, to review and
+   publish there) or **Open the post** if you chose Publish right away. **Details** opens the job's live progress
+   (upload %, encoding, re-uploads, play links, log).
 
-**The queue** (top of Jobs) has two lanes, each running one step at a time in order, with live progress per job
-(upload %, encoding, re-uploads, log): uploads (they share your uplink) and sends (the Patreon profile can only be
-open in one Chrome). The lanes run side by side, so a send doesn't wait behind another job's upload. A job's own
-upload and send never overlap: Send only appears once its post is built. A folder can't be queued twice, its post can't be edited while it's queued
-or running, and reading tiers waits for a send to finish. A queued step can be cancelled; a running one stops with
-Ctrl+C in the terminal.
+Review happens on Patreon: that's what the draft is for. The template's **On Patreon** view shows the layout
+before you start. The thumbnail can be an image in the folder, or **Upload image…** copies one into the folder
+(only files in the folder are ever sent).
+
+**The queue** has two lanes, each running one job phase at a time in order: uploads (they share your uplink) and
+sends (the Patreon profile can only be open in one Chrome). The lanes run side by side, so a send doesn't wait
+behind another job's upload; a job's own send starts only after its upload and build. A folder can't be queued
+twice, and reading tiers waits for a send to finish. A queued job can be cancelled; a running one stops with
+Ctrl+C in the terminal. A failed send has **Send again**; a built job that was never sent has **Send** in the jobs
+list.
 
 "Who can see it" and "Patreon collection" list your real tiers and collections: **↻ Read tiers and collections
 from Patreon** opens Chrome on the post editor for about 15 s and caches them in `~/.vidpub/patreon.json`. It reuses
@@ -124,13 +130,14 @@ one draft titled "vidpub scratch…" every time; leave that draft alone (deletin
 new one).
 
 `node vidpub.ts <folder>/job.json` reruns a GUI job, and a CLI-made `job.json` opens in the GUI. Below the queue,
-**Jobs** lists the jobs in folders you've picked, including ones built and waiting for review.
+**Jobs** lists the jobs in folders you've picked.
 **Settings** writes the Bunny library ID and API key to `.env` and checks them with Bunny; the key is never shown
 again.
 
 The queue runs in the terminal process, not the tab: close the tab anytime and reopen the URL the terminal printed.
-Ctrl+C stops it (and drops what's queued); Start again resumes like a CLI rerun. If you edited the preview and then
-change the job, the build stops rather than drop your edits, and Jobs offers to rebuild the post from the job.
+Ctrl+C stops it (and drops what's queued); Start again resumes like a CLI rerun: finished uploads are kept. If
+you hand-edited `<job>.post.json` and then change the job, the build stops rather than drop your edits, and Jobs
+offers to rebuild the post from the job.
 
 It only listens on 127.0.0.1, but any website you visit can send requests to localhost. So every request needs the
 random per-launch token from the opened URL, Host and Origin must be the server's own (blocks DNS rebinding and

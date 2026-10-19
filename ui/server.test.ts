@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { applyEdits, listFolder, postProblems, serve, writeJob } from "./server.ts";
+import { listFolder, postProblems, serve, writeJob } from "./server.ts";
 
 process.env.VIDPUB_TEMPLATES = mkdtempSync(join(tmpdir(), "vidpub-tpl-")); // never the user's own saved templates
 
@@ -33,33 +33,14 @@ test("GUI job: saved as a CLI job.json and read back; bad input lists every prob
   assert.ok(!existsSync(join(dir, ".job.draft.json")));
 });
 
-test("preview edits change only the title and text blocks; emptied text is dropped", () => {
-  const doc = { title: "Oct", access: "public", blocks: [{ text: "Hi" }, { image: "https://cdn/p.webp" }, { link: "https://play/1" }, { text: "Bye" }] };
-  const body = { title: " October ", texts: [" Hello ", ""], blocks: [{ image: "/etc/passwd" }] }; // blocks: ignored
-  const edited = applyEdits(doc, body);
-  assert.deepEqual(edited, { ...doc, title: "October", blocks: [{ text: "Hello" }, { image: "https://cdn/p.webp" }, { link: "https://play/1" }] });
-  assert.deepEqual(applyEdits(doc, { title: 5, texts: "nope" }), doc);
-});
-
-test("preview paywall: placed, moved, removed; a malformed one is refused", () => {
-  const doc = { title: "T", access: "paid", blocks: [{ text: "free" }, { image: "https://c/1.webp" }, { link: "https://p/1" }] };
-  const placed = applyEdits(doc, { paywall: 2 });
-  assert.deepEqual(placed.blocks.map((b) => Object.keys(b)[0]), ["text", "image", "paywall", "link"]);
-  assert.deepEqual(applyEdits(placed, { paywall: 0 }).blocks[0], { paywall: true }); // moved, still one
-  assert.equal(applyEdits(placed, { paywall: 0 }).blocks.filter((b) => "paywall" in b).length, 1);
-  assert.deepEqual(applyEdits(placed, { paywall: null }).blocks, doc.blocks);
-  assert.deepEqual(applyEdits(placed, {}).blocks, placed.blocks); // absent: unchanged
-  assert.deepEqual(applyEdits(doc, { paywall: 99 }).blocks.at(-1), { paywall: true }); // clamped
-  // position counts the blocks as shown, before an emptied text block drops out
-  assert.deepEqual(applyEdits(doc, { texts: [""], paywall: 1 }).blocks.map((b) => Object.keys(b)[0]), ["paywall", "image", "link"]);
+test("post file shape: paywall, divider, button pass; malformed blocks are refused", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-pw-")));
   const job = { path: join(dir, "job.json"), videos: [], images: [], publish: [] };
-  assert.deepEqual(postProblems(dir, job, placed), []);
-  assert.deepEqual(postProblems(dir, job, { ...doc, blocks: [{ paywall: "yes" }] } as never), ["the post file is malformed: rebuild it"]);
-  const ok = { ...doc, blocks: [{ divider: true }, { button: { text: "Play", url: "https://p/1", caption: "a" } }] };
-  assert.deepEqual(postProblems(dir, job, ok as never), []);
-  for (const button of [{ text: "Play", url: "/etc/hosts" }, { text: "Play", url: "https://p", extra: 1 }]) {
-    assert.deepEqual(postProblems(dir, job, { ...doc, blocks: [{ button }] } as never), ["the post file is malformed: rebuild it"]);
+  const doc = { title: "T", access: "paid", blocks: [{ text: "free" }, { paywall: true }, { divider: true },
+    { button: { text: "Play", url: "https://p/1", caption: "a" } }, { image: "https://c/1.webp" }, { link: "https://p/1" }] };
+  assert.deepEqual(postProblems(dir, job, doc as never), []);
+  for (const blocks of [[{ paywall: "yes" }], [{ button: { text: "Play", url: "/etc/hosts" } }], [{ button: { text: "Play", url: "https://p", extra: 1 } }]]) {
+    assert.deepEqual(postProblems(dir, job, { ...doc, blocks } as never), ["the post file is malformed: rebuild it"]);
   }
 });
 
@@ -85,7 +66,7 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
 
 /** A GUI server over folders `names` (each with <name>.mp4) in a temp dir, with a Bunny whose uploads wait for
  *  gate(name) and that says "ready" once uploaded. Talks to it like the page does. */
-async function queueServer(names: string[], publishers: Record<string, (doc: { title: string }) => string>) {
+async function queueServer(names: string[], publishers: Record<string, (doc: { title: string }) => string | Promise<string>>) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-q-")));
   const dirs = names.map((n) => (mkdirSync(join(root, n)), writeFileSync(join(root, n, `${n}.mp4`), "x"), join(root, n)));
   writeFileSync(join(root, "ui.json"), JSON.stringify({ folders: dirs }));
@@ -119,7 +100,7 @@ async function queueServer(names: string[], publishers: Record<string, (doc: { t
     const reader = res.body!.getReader();
     const { value } = await reader.read();
     await reader.cancel();
-    return JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")).queue as { id: number; dir: string; step: string; state: string; log: string[] }[];
+    return JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")).queue as { id: number; dir: string; step: string; state: string; result?: string; log: string[] }[];
   };
   const until = async (ok: (q: Awaited<ReturnType<typeof queue>>) => boolean) => {
     for (let i = 0; i < 200; i++) {
@@ -131,7 +112,9 @@ async function queueServer(names: string[], publishers: Record<string, (doc: { t
   };
   const form = (n: string) => ({ template: "video-previews", videos: [`${n}.mp4`], post: { title: n, access: "paid" }, publish: ["patreon_browser"] });
   const close = () => (server.close(), server.closeAllConnections());
-  return { dirs, gate, uploads, post, queue, until, form, close };
+  const upload = (dir: string, name: string, body: string) =>
+    fetch(`${origin}/api/thumbnail?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, { method: "POST", headers, body });
+  return { dirs, gate, uploads, post, queue, until, form, close, upload };
 }
 
 test("queue: one upload at a time, a job is never queued twice, only queued steps cancel, the next one runs after", async () => {
@@ -143,11 +126,10 @@ test("queue: one upload at a time, a job is never queued twice, only queued step
     assert.deepEqual(q.map((x) => x.state), ["running", "queued", "queued"]);
     assert.equal((await post("/api/cancel", { id: q[0].id })).status, 409); // running: can't cancel
     assert.equal((await post("/api/cancel", { id: q[2].id })).status, 200);
-    assert.equal((await post("/api/post/save", { dir: a, title: "x" })).status, 400); // nothing built yet
     gate("a").open();
     gate("b").open();
     q = await until((q) => q.every((x) => x.state === "done"));
-    assert.deepEqual(q.map((x) => x.dir), [a, b]);
+    assert.deepEqual(q.map((x) => [x.dir, x.step]), [[a, "publish"], [b, "publish"]]); // uploaded, built, sent: one entry each
     assert.deepEqual(uploads, [join(a, "a.mp4"), join(b, "b.mp4")]); // in order, never two at once
     assert.ok(existsSync(join(a, "job.json.post.json")) && !existsSync(join(c, "job.json.post.json"))); // c never ran
     // a rebuild from a saved job.json that points outside its folder is refused before anything is queued
@@ -160,26 +142,46 @@ test("queue: one upload at a time, a job is never queued twice, only queued step
   }
 });
 
-test("queue lanes: a send runs while another job uploads; each step logs to its own log", async () => {
+test("queue lanes: one entry goes upload → send; a send runs while another job uploads; logs stay apart", async () => {
+  let openSend!: () => void;
+  const sendGate = new Promise<void>((ok) => (openSend = ok));
   const sent: string[] = [];
-  const publisher = (doc: { title: string }) => (console.log(`sending ${doc.title}`), sent.push(doc.title), "https://draft");
+  const publisher = async (doc: { title: string }) => (console.log(`sending ${doc.title}`), await sendGate, sent.push(doc.title), "https://draft");
   const { dirs: [x, y], gate, post, until, form, close } = await queueServer(["x", "y"], { patreon_browser: publisher });
   try {
     gate("x").open();
     assert.equal((await post("/api/start", { dir: x, form: form("x") })).status, 200);
-    await until((q) => q[0]?.state === "done"); // x built
-    assert.equal((await post("/api/start", { dir: y, form: form("y") })).status, 200); // y's upload holds the upload lane
-    await until((q) => q.some((s) => s.dir === y && s.state === "running"));
-    assert.equal((await post("/api/publish", { dir: x })).status, 200);
-    const q = await until((q) => q.some((s) => s.dir === x && s.step === "publish" && s.state === "done"));
-    assert.equal(q.find((s) => s.dir === y)!.state, "running"); // the send didn't wait for it
+    await until((q) => q[0]?.step === "publish" && q[0].state === "running"); // x uploaded, built, now sending (held)
+    assert.equal((await post("/api/start", { dir: y, form: form("y") })).status, 200);
+    let q = await until((q) => q.some((s) => s.dir === y && s.state === "running")); // y uploads meanwhile
+    assert.deepEqual(q.map((s) => [s.dir, s.step, s.state]), [[x, "publish", "running"], [y, "upload", "running"]]);
+    openSend();
+    q = await until((q) => q.some((s) => s.dir === x && s.state === "done"));
+    assert.equal(q.find((s) => s.dir === x)!.result, "https://draft"); // the link shows on the job
     assert.deepEqual(sent, ["x"]);
-    const logOf = (dir: string, step: string) => q.find((s) => s.dir === dir && s.step === step)!.log.join("\n");
-    assert.match(logOf(x, "publish"), /sending x/);
-    assert.doesNotMatch(logOf(y, "upload"), /sending x/);
-    assert.match(logOf(y, "upload"), /uploading y\.mp4/);
+    const logOf = (dir: string) => q.find((s) => s.dir === dir)!.log.join("\n");
+    assert.match(logOf(x), /sending x/);
+    assert.doesNotMatch(logOf(y), /sending x/);
+    assert.match(logOf(y), /uploading y\.mp4/);
     gate("y").open();
     await until((q) => q.every((s) => s.state === "done"));
+  } finally {
+    close();
+  }
+});
+
+test("thumbnail upload: copied into the job folder under a safe name, images only, never overwrites", async () => {
+  const { dirs: [a], close, upload } = await queueServer(["a"], {});
+  try {
+    const first = await upload(a, "../../cover.png", "one");
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).name, "cover.png"); // the path part is dropped: it lands in the folder
+    assert.equal(readFileSync(join(a, "cover.png"), "utf8"), "one");
+    assert.equal((await (await upload(a, "cover.png", "two")).json()).name, "cover 2.png");
+    assert.equal(readFileSync(join(a, "cover.png"), "utf8"), "one");
+    assert.equal((await upload(a, "notes.txt", "x")).status, 400);
+    assert.equal((await upload(a, ".hidden.png", "x")).status, 400);
+    assert.equal((await upload(tmpdir(), "x.png", "x")).status, 403); // not a picked folder
   } finally {
     close();
   }

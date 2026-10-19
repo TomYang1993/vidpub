@@ -18,7 +18,7 @@ import { parseEnv, promisify } from "node:util";
 import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
 import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
 import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
-import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, savePost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
+import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
 /** A job as the page sends it: names of files in the picked folder instead of paths. */
 export type Form = {
@@ -31,7 +31,8 @@ export type Form = {
 };
 type Env = Record<string, string | undefined>;
 type Row = { name: string; label: string; pct: number | null; status?: number | null };
-/** One step of one job in the queue: "upload" = upload the videos and build the post; "publish" = send it. */
+/** One job in the queue. step "upload" = upload the videos and build the post, then (if it has a post) the same entry
+ *  moves to step "publish" = send it; a retried send starts at "publish". */
 type Live = {
   id: number; dir: string; jobPath: string; step: "upload" | "publish"; state: "queued" | "running" | "done" | "failed";
   added: number; result?: string; error?: string;
@@ -90,26 +91,6 @@ export function writeJob(dir: string, form: Form, publishers: Record<string, Pub
     rmSync(draft, { force: true });
   }
   return loadJob(join(dir, "job.json"), publishers);
-}
-
-/** The page's edits to a saved post. Only the title, the wording of existing text blocks and where the paywall sits
- *  can change, so the page can't slip in an image path (a publisher would upload that file). Emptied text blocks are
- *  dropped. paywall: its position among the other blocks as shown (0 = top), null = no paywall, absent = unchanged. */
-export function applyEdits(doc: PostDoc, edits: { title?: unknown; texts?: unknown; paywall?: unknown }): PostDoc {
-  const texts = Array.isArray(edits.texts) ? edits.texts : [];
-  let i = 0;
-  let blocks = doc.blocks.map((b) => {
-    if (!("text" in b)) return b;
-    const t = texts[i++];
-    return typeof t === "string" ? { text: t.trim() } : b;
-  });
-  const at = edits.paywall;
-  if (at === null || Number.isInteger(at)) {
-    blocks = blocks.filter((b) => !("paywall" in b));
-    if (at !== null) blocks.splice(Math.max(0, Math.min(blocks.length, at as number)), 0, { paywall: true });
-  }
-  blocks = blocks.filter((b) => !("text" in b) || b.text);
-  return { ...doc, title: typeof edits.title === "string" && edits.title.trim() ? edits.title.trim() : doc.title, blocks };
 }
 
 /** Why a post can't be sent from `dir`: a malformed post file, or local files it would upload or read that aren't
@@ -200,7 +181,8 @@ export function serve(opts: {
   let nextId = 1;
   const laneOf = (q: Live) => (q.step === "upload" ? "upload" : "send");
   const busy = { upload: false, send: false };
-  const works = new Map<number, () => Promise<string>>();
+  type Phases = { upload?: () => Promise<string>; publish?: () => Promise<string> };
+  const works = new Map<number, Phases>();
   const clients = new Set<ServerResponse>();
 
   const readEnv = (): Env => ({ ...process.env, ...(existsSync(envFile) ? parseEnv(readFileSync(envFile, "utf8")) : {}) });
@@ -279,10 +261,10 @@ export function serve(opts: {
     return { onEvent, onUpload };
   }
 
-  /** Queue a step: the request returns now, the worker runs it in turn, progress goes out over /events. */
-  function enqueue(cur: Live, work: () => Promise<string>) {
+  /** Queue a job: the request returns now, the lanes run its phases in turn, progress goes out over /events. */
+  function enqueue(cur: Live, phases: Phases) {
     queue.push(cur);
-    works.set(cur.id, work);
+    works.set(cur.id, phases);
     push();
     pump();
   }
@@ -309,8 +291,13 @@ export function serve(opts: {
       cur.log = [...cur.log.slice(-299), line];
       push();
     };
-    stepLog.run(sink, () => works.get(cur.id)!())
+    const phases = works.get(cur.id)!;
+    stepLog.run(sink, () => phases[cur.step]!())
       .then((done) => {
+        if (cur.step === "upload" && phases.publish) { // built: on to the send lane, same entry
+          Object.assign(cur, { step: "publish", state: "queued", result: done });
+          return;
+        }
         Object.assign(cur, { state: "done", result: done });
         notify(`${basename(cur.dir)}: ${done}`);
       }, (e: Error) => {
@@ -318,7 +305,7 @@ export function serve(opts: {
         notify(`${basename(cur.dir)} failed: ${e.message}`);
       })
       .finally(() => {
-        works.delete(cur.id);
+        if (cur.state !== "queued") works.delete(cur.id);
         busy[lane] = false;
         const finished = queue.filter((q) => q.state === "done" || q.state === "failed");
         const drop = new Set(finished.slice(0, Math.max(0, finished.length - FINISHED_KEPT)));
@@ -328,8 +315,8 @@ export function serve(opts: {
       });
   }
 
-  /** Step 1: save job.json (form = null: keep the saved one), upload the videos (if any) and build <job>.post.json
-   *  for review. Nothing is published. */
+  /** Queue a job: save job.json (form = null: keep the saved one), upload the videos, build <job>.post.json, then
+   *  send it to the job's publishers (a Patreon draft, or published if post.publishNow). */
   function start(dir: string, form: Form | null, rebuild: boolean) {
     busyWith(join(dir, "job.json")); // before writing: a queued job's job.json must not change under it
     const job = form ? writeJob(dir, form, publishers) : loadJob(join(dir, "job.json"), publishers);
@@ -341,40 +328,51 @@ export function serve(opts: {
     if (job.videos.length && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
       throw fail(400, "Saved job.json. Add your Bunny library ID and API key in Settings, then Start.");
     }
+    needLogin(job); // now, not after hours of uploading
     const cur = begin(dir, job, "upload");
     const { onEvent, onUpload } = track(cur, job);
-    enqueue(cur, async () => {
-      const videos = job.videos.length ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : [];
-      if (!job.post) return "videos are ready";
-      if (rebuild) rmSync(postPath(job), { force: true }); // the page asked to drop hand edits the job no longer matches
-      buildPost(job, videos);
-      return "the post is ready to review";
+    enqueue(cur, {
+      upload: async () => {
+        const videos = job.videos.length ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : [];
+        if (!job.post) return "videos are ready";
+        if (rebuild) rmSync(postPath(job), { force: true }); // drop hand edits the job no longer matches
+        buildPost(job, videos);
+        return "post built";
+      },
+      publish: job.post && job.publish.length ? send(dir, cur) : undefined,
     });
   }
 
-  /** Step 2: send <job>.post.json, exactly as saved, to the job's publishers. */
+  /** Send a built post again (after a failed send). */
   function publish(dir: string) {
     busyWith(join(dir, "job.json"));
     const { job, doc } = readPost(dir);
     if (!job || !doc) throw fail(400, "no post yet: press Start first");
     const problems = postProblems(dir, job, doc);
     if (problems.length) throw fail(400, `Not sending:\n${problems.join("\n")}`);
-    if (job.publish.includes("patreon_browser") && publishers === PUBLISHERS && !existsSync(PATREON_PROFILE)) {
-      throw fail(400, "Log in to Patreon once first: run node patreon-login.ts in the vidpub folder, then send again.");
-    }
+    needLogin(job);
     const cur = begin(dir, job, "publish");
-    enqueue(cur, async () => {
-      // checked again now: the files may have changed while this waited in the queue
-      const now = readPost(dir);
-      if (!now.job || !now.doc) throw new Error("the post file is gone: press Start again");
-      const later = postProblems(dir, now.job, now.doc);
-      if (later.length) throw new Error(`Not sending:\n${later.join("\n")}`);
-      await publishPost(now.job, publishers, track(cur, now.job).onEvent);
-      return "post sent";
-    });
+    enqueue(cur, { publish: send(dir, cur) });
   }
 
-  /** The saved post for the preview, with what each publisher already did. */
+  function needLogin(job: Job) {
+    if (job.publish.includes("patreon_browser") && publishers === PUBLISHERS && !existsSync(PATREON_PROFILE)) {
+      throw fail(400, "Log in to Patreon once first: run node patreon-login.ts in the vidpub folder, then Start again.");
+    }
+  }
+
+  /** The send phase: <job>.post.json, exactly as saved, to the job's publishers. Returns their links. */
+  const send = (dir: string, cur: Live) => async () => {
+    // checked again now: the files may have changed while this waited in the queue
+    const now = readPost(dir);
+    if (!now.job || !now.doc) throw new Error("the post file is gone: press Start again");
+    const later = postProblems(dir, now.job, now.doc);
+    if (later.length) throw new Error(`Not sending:\n${later.join("\n")}`);
+    await publishPost(now.job, publishers, track(cur, now.job).onEvent);
+    return Object.values(readPost(dir).published ?? {}).join(" ");
+  };
+
+  /** The job's saved post, with what each publisher already did. */
   function readPost(dir: string) {
     const job = loadJob(join(dir, "job.json"), publishers);
     if (!existsSync(postPath(job))) return { doc: null };
@@ -410,6 +408,15 @@ export function serve(opts: {
     let s = "";
     for await (const chunk of req) if ((s += chunk).length > 1e6) throw fail(413, "request too big");
     return s ? JSON.parse(s) : {};
+  }
+  async function bytes(req: IncomingMessage, max: number) {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      if ((size += chunk.length) > max) throw fail(413, `too big: ${Math.round(max / 1e6)} MB at most`);
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
   }
   const json = (res: ServerResponse, status: number, data: unknown) => {
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(data));
@@ -481,19 +488,19 @@ export function serve(opts: {
         works.delete(cur.id);
         push();
         json(res, 200, { ok: true });
-      } else if (route === "POST /api/post") {
-        const { job, ...post } = readPost(picked((await body(req)).dir));
-        json(res, 200, post);
-      } else if (route === "POST /api/post/save") {
-        const edits = await body(req);
-        const { doc, job } = readPost(picked(edits.dir));
-        if (!doc || !job) throw fail(400, "no post yet: press Start first");
-        busyWith(job.path); // a queued send sends the file as it is when it runs; a running build rewrites it
-        savePost(job, applyEdits(doc, edits));
-        json(res, 200, { ok: true });
       } else if (route === "POST /api/publish") {
         publish(picked((await body(req)).dir));
         json(res, 200, { ok: true });
+      } else if (route === "POST /api/thumbnail") { // an image from anywhere, copied into the job folder: only files in it are sent
+        const dir = picked(url.searchParams.get("dir"));
+        const name = basename(url.searchParams.get("name") ?? "").replace(/[^\p{L}\p{N} ._()-]/gu, "_");
+        const ext = extname(name).toLowerCase();
+        if (!IMAGE_MIME[ext] || name.startsWith(".")) throw fail(400, "pick a JPG, PNG, GIF, WebP or AVIF image");
+        const data = await bytes(req, 50e6);
+        let file = join(dir, name);
+        for (let i = 2; existsSync(file); i++) file = join(dir, `${basename(name, ext)} ${i}${ext}`); // never overwrite
+        writeFileSync(file, data, { flag: "wx" });
+        json(res, 200, { name: basename(file), size: data.length });
       } else if (route === "GET /file") { // preview images that are files (an image gallery's), only from picked folders
         const p = url.searchParams.get("p") ?? "";
         const file = join(picked(dirname(p)), basename(p));
