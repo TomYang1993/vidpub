@@ -6,6 +6,7 @@
 // Any website you visit can send requests to a server on localhost, so every request needs the per-launch token
 // from the opened URL, Host and Origin must be this server's own (blocks DNS rebinding and CSRF), and files are
 // only read in folders picked with the native folder dialog.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -37,6 +38,15 @@ type Live = {
   videos: Row[]; publish: { name: string; running: boolean; result?: string }[]; links: Video[]; log: string[];
 };
 const FINISHED_KEPT = 20; // finished steps the Jobs tab still shows
+
+// The engine logs with console.log. Each queued step runs inside stepLog with its own sink, so its lines land in that
+// step's log even when an upload and a send run at the same time. Outside a step, console.log is unchanged.
+const stepLog = new AsyncLocalStorage<(line: string) => void>();
+const consoleLog = console.log;
+console.log = (...a: unknown[]) => {
+  consoleLog(...a);
+  stepLog.getStore()?.(a.join(" "));
+};
 
 const IMAGE_MIME: Record<string, string> = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif" };
 const DRAFT = ".job.draft.json"; // validated here before it may replace job.json
@@ -184,11 +194,12 @@ export function serve(opts: {
   const page = readFileSync(join(import.meta.dirname, "index.html"));
   const token = Buffer.from(randomBytes(32).toString("base64url"));
   let recent: string[] = existsSync(recentFile) ? JSON.parse(readFileSync(recentFile, "utf8")).folders : [];
-  // ponytail: one worker runs the queue one step at a time. Uploads share the uplink anyway, and the Patreon profile
-  // can only be open in one Chrome. Parallel steps would need per-step logs and a profile lock.
+  // Two lanes, each one step at a time: uploads (they share the uplink anyway) and sends (the Patreon profile can only
+  // be open in one Chrome). The lanes run side by side, so a 15 s send doesn't wait behind an hours-long upload.
   let queue: Live[] = [];
   let nextId = 1;
-  let busy = false;
+  const laneOf = (q: Live) => (q.step === "upload" ? "upload" : "send");
+  const busy = { upload: false, send: false };
   const works = new Map<number, () => Promise<string>>();
   const clients = new Set<ServerResponse>();
 
@@ -276,24 +287,29 @@ export function serve(opts: {
     pump();
   }
 
-  /** Start the next queued step unless one is running. */
+  /** Start the next queued step in each lane that's free. */
   function pump() {
-    if (busy) return;
-    const cur = queue.find((q) => q.state === "queued");
-    if (!cur) return;
-    if (cur.step === "publish" && readingPatreon) return void setTimeout(pump, 1000); // Chrome is reading tiers
-    busy = true;
+    for (const lane of ["upload", "send"] as const) {
+      if (busy[lane]) continue;
+      const cur = queue.find((q) => q.state === "queued" && laneOf(q) === lane);
+      if (!cur) continue;
+      if (lane === "send" && readingPatreon) { // Chrome is reading tiers: try again in a second
+        setTimeout(pump, 1000);
+        continue;
+      }
+      run(cur, lane);
+    }
+  }
+
+  function run(cur: Live, lane: keyof typeof busy) {
+    busy[lane] = true;
     cur.state = "running";
-    // ponytail: mirror the engine's console into the step's log instead of threading a logger through it.
-    // Global, so fine with one step at a time.
-    const log = console.log;
-    console.log = (...a: unknown[]) => {
-      log(...a);
-      cur.log = [...cur.log.slice(-299), a.join(" ")];
+    push();
+    const sink = (line: string) => {
+      cur.log = [...cur.log.slice(-299), line];
       push();
     };
-    push();
-    works.get(cur.id)!()
+    stepLog.run(sink, () => works.get(cur.id)!())
       .then((done) => {
         Object.assign(cur, { state: "done", result: done });
         notify(`${basename(cur.dir)}: ${done}`);
@@ -302,9 +318,8 @@ export function serve(opts: {
         notify(`${basename(cur.dir)} failed: ${e.message}`);
       })
       .finally(() => {
-        console.log = log;
         works.delete(cur.id);
-        busy = false;
+        busy[lane] = false;
         const finished = queue.filter((q) => q.state === "done" || q.state === "failed");
         const drop = new Set(finished.slice(0, Math.max(0, finished.length - FINISHED_KEPT)));
         queue = queue.filter((q) => !drop.has(q));

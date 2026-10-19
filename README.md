@@ -111,9 +111,10 @@ The same flow without writing `job.json` by hand, in two steps:
    the title and text, add or move the paywall (↑ ↓ or drag), save, then **Send to Patreon** (a draft, or published
    right away): that's queued too, and the draft link shows up in Jobs.
 
-**The queue** (top of Jobs) runs one step at a time, in order, with live progress per job (upload %, encoding,
-re-uploads, log). Uploads share your uplink and the Patreon profile can only be open in one Chrome, so running
-steps side by side wouldn't be faster. A folder can't be queued twice, its post can't be edited while it's queued
+**The queue** (top of Jobs) has two lanes, each running one step at a time in order, with live progress per job
+(upload %, encoding, re-uploads, log): uploads (they share your uplink) and sends (the Patreon profile can only be
+open in one Chrome). The lanes run side by side, so a send doesn't wait behind another job's upload. A job's own
+upload and send never overlap: Send only appears once its post is built. A folder can't be queued twice, its post can't be edited while it's queued
 or running, and reading tiers waits for a send to finish. A queued step can be cancelled; a running one stops with
 Ctrl+C in the terminal.
 

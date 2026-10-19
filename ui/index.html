@@ -278,7 +278,7 @@
   <div id="tab-jobs" hidden>
     <section class="card" id="queue-card" hidden aria-live="polite">
       <h2>Queue</h2>
-      <p class="hint" style="margin: -6px 0 4px">One step runs at a time; the rest wait their turn. Closing this tab doesn't stop anything: it runs in the terminal (Ctrl+C there stops it, and Start again resumes).</p>
+      <p class="hint" style="margin: -6px 0 4px">Uploads run one at a time, and so do sends; an upload and a send run side by side. Closing this tab doesn't stop anything: it runs in the terminal (Ctrl+C there stops it, and Start again resumes).</p>
       <div id="queue"></div>
     </section>
     <section class="card">
@@ -657,7 +657,8 @@ function renderQueue() {
   const finished = queue.filter((q) => !live.includes(q)).reverse(); // newest first
   $("queue-card").hidden = !queue.length;
   document.querySelector('nav button[data-tab="jobs"]').textContent = live.length ? `Jobs (${live.length})` : "Jobs";
-  $("queue").replaceChildren(...[...live, ...finished].map((q) => queueEntry(q, live.indexOf(q))));
+  const ahead = (q) => live.filter((x) => x.step === q.step && live.indexOf(x) < live.indexOf(q)).length; // in its own lane
+  $("queue").replaceChildren(...[...live, ...finished].map((q) => queueEntry(q, ahead(q))));
 }
 
 function queueEntry(q, pos) {

@@ -83,24 +83,33 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
   assert.equal(readFileSync(elsewhere, "utf8"), "secret");
 });
 
-test("queue: one step at a time, a job is never queued twice, only queued steps cancel, the next one runs after", async () => {
+/** A GUI server over folders `names` (each with <name>.mp4) in a temp dir, with a Bunny whose uploads wait for
+ *  gate(name) and that says "ready" once uploaded. Talks to it like the page does. */
+async function queueServer(names: string[], publishers: Record<string, (doc: { title: string }) => string>) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-q-")));
-  const [a, b, c] = ["a", "b", "c"].map((n) => (mkdirSync(join(root, n)), writeFileSync(join(root, n, `${n}.mp4`), "x"), join(root, n)));
-  writeFileSync(join(root, "ui.json"), JSON.stringify({ folders: [a, b, c] }));
+  const dirs = names.map((n) => (mkdirSync(join(root, n)), writeFileSync(join(root, n, `${n}.mp4`), "x"), join(root, n)));
+  writeFileSync(join(root, "ui.json"), JSON.stringify({ folders: dirs }));
   writeFileSync(join(root, "env"), "BUNNY_LIBRARY_ID=1\nBUNNY_API_KEY=k\n");
-  let release!: () => void;
-  const gate = new Promise<void>((ok) => (release = ok)); // holds the first upload until the checks are done
+  const gates = new Map<string, { open: () => void; wait: Promise<void> }>();
+  const gate = (n: string) => {
+    if (!gates.has(n)) {
+      let open!: () => void;
+      const wait = new Promise<void>((ok) => (open = ok));
+      gates.set(n, { open, wait });
+    }
+    return gates.get(n)!;
+  };
   const uploads: string[] = [];
-  const done = new Set<string>(); // Bunny says "ready" once a video is uploaded
+  const done = new Set<string>();
   const makeHost = () => ({
     findOrCreateCollection: async () => "col", createVideo: async (t: string) => `g-${t}`, deleteVideo: async () => {},
     status: async (g: string) => (done.has(g) ? 4 : null), tusCreate: async () => "tus",
-    tusUpload: async (p: string, g: string) => (uploads.push(p), await gate, done.add(g), true),
+    tusUpload: async (p: string, g: string) => (uploads.push(p), await gate(g.slice(2)).wait, done.add(g), true),
     playUrl: (g: string) => `https://play/${g}`, previewUrl: async () => undefined,
   });
   const { server, url } = await serve({
     recentFile: join(root, "ui.json"), envFile: join(root, "env"), chooseFolder: async () => null,
-    makeHost: makeHost as never, publishers: { patreon_browser: () => "https://draft" }, patreonCache: () => null,
+    makeHost: makeHost as never, publishers: publishers as never, patreonCache: () => null,
   });
   const { origin, searchParams } = new URL(url);
   const headers = { "x-vidpub-token": searchParams.get("t")!, origin, "content-type": "application/json" };
@@ -110,9 +119,23 @@ test("queue: one step at a time, a job is never queued twice, only queued steps 
     const reader = res.body!.getReader();
     const { value } = await reader.read();
     await reader.cancel();
-    return JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")).queue as { id: number; dir: string; state: string }[];
+    return JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")).queue as { id: number; dir: string; step: string; state: string; log: string[] }[];
+  };
+  const until = async (ok: (q: Awaited<ReturnType<typeof queue>>) => boolean) => {
+    for (let i = 0; i < 200; i++) {
+      const q = await queue();
+      if (ok(q)) return q;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`queue never got there: ${JSON.stringify((await queue()).map((x) => [x.dir, x.step, x.state]))}`);
   };
   const form = (n: string) => ({ template: "video-previews", videos: [`${n}.mp4`], post: { title: n, access: "paid" }, publish: ["patreon_browser"] });
+  const close = () => (server.close(), server.closeAllConnections());
+  return { dirs, gate, uploads, post, queue, until, form, close };
+}
+
+test("queue: one upload at a time, a job is never queued twice, only queued steps cancel, the next one runs after", async () => {
+  const { dirs: [a, b, c], gate, uploads, post, queue, until, form, close } = await queueServer(["a", "b", "c"], { patreon_browser: () => "https://draft" });
   try {
     for (const [dir, n] of [[a, "a"], [b, "b"], [c, "c"]]) assert.equal((await post("/api/start", { dir, form: form(n) })).status, 200);
     assert.equal((await post("/api/start", { dir: b, form: form("b") })).status, 409); // already queued
@@ -121,9 +144,10 @@ test("queue: one step at a time, a job is never queued twice, only queued steps 
     assert.equal((await post("/api/cancel", { id: q[0].id })).status, 409); // running: can't cancel
     assert.equal((await post("/api/cancel", { id: q[2].id })).status, 200);
     assert.equal((await post("/api/post/save", { dir: a, title: "x" })).status, 400); // nothing built yet
-    release();
-    for (let i = 0; i < 100 && (q = await queue()).some((x) => x.state !== "done"); i++) await new Promise((ok) => setTimeout(ok, 20));
-    assert.deepEqual(q.map((x) => [x.dir, x.state]), [[a, "done"], [b, "done"]]);
+    gate("a").open();
+    gate("b").open();
+    q = await until((q) => q.every((x) => x.state === "done"));
+    assert.deepEqual(q.map((x) => x.dir), [a, b]);
     assert.deepEqual(uploads, [join(a, "a.mp4"), join(b, "b.mp4")]); // in order, never two at once
     assert.ok(existsSync(join(a, "job.json.post.json")) && !existsSync(join(c, "job.json.post.json"))); // c never ran
     // a rebuild from a saved job.json that points outside its folder is refused before anything is queued
@@ -132,7 +156,31 @@ test("queue: one step at a time, a job is never queued twice, only queued steps 
     assert.equal(res.status, 400);
     assert.match((await res.json()).error, /outside/);
   } finally {
-    server.close();
-    server.closeAllConnections();
+    close();
+  }
+});
+
+test("queue lanes: a send runs while another job uploads; each step logs to its own log", async () => {
+  const sent: string[] = [];
+  const publisher = (doc: { title: string }) => (console.log(`sending ${doc.title}`), sent.push(doc.title), "https://draft");
+  const { dirs: [x, y], gate, post, until, form, close } = await queueServer(["x", "y"], { patreon_browser: publisher });
+  try {
+    gate("x").open();
+    assert.equal((await post("/api/start", { dir: x, form: form("x") })).status, 200);
+    await until((q) => q[0]?.state === "done"); // x built
+    assert.equal((await post("/api/start", { dir: y, form: form("y") })).status, 200); // y's upload holds the upload lane
+    await until((q) => q.some((s) => s.dir === y && s.state === "running"));
+    assert.equal((await post("/api/publish", { dir: x })).status, 200);
+    const q = await until((q) => q.some((s) => s.dir === x && s.step === "publish" && s.state === "done"));
+    assert.equal(q.find((s) => s.dir === y)!.state, "running"); // the send didn't wait for it
+    assert.deepEqual(sent, ["x"]);
+    const logOf = (dir: string, step: string) => q.find((s) => s.dir === dir && s.step === step)!.log.join("\n");
+    assert.match(logOf(x, "publish"), /sending x/);
+    assert.doesNotMatch(logOf(y, "upload"), /sending x/);
+    assert.match(logOf(y, "upload"), /uploading y\.mp4/);
+    gate("y").open();
+    await until((q) => q.every((s) => s.state === "done"));
+  } finally {
+    close();
   }
 });
