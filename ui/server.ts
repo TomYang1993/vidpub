@@ -17,6 +17,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
 import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
+import { download, listCollections, moveVideos, popularity, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
 import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
 import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
@@ -34,8 +35,8 @@ type Row = { name: string; label: string; pct: number | null; status?: number | 
 /** One job in the queue. step "upload" = upload the videos and build the post, then (if it has a post) the same entry
  *  moves to step "publish" = send it; a retried send starts at "publish". */
 type Live = {
-  id: number; dir: string; jobPath: string; step: "upload" | "publish"; state: "queued" | "running" | "done" | "failed";
-  added: number; result?: string; error?: string;
+  id: number; dir: string; jobPath: string; step: "upload" | "publish" | "download"; state: "queued" | "running" | "done" | "failed";
+  added: number; result?: string; error?: string; title?: string; // title: a download's video
   videos: Row[]; publish: { name: string; running: boolean; result?: string }[]; links: Video[]; log: string[];
 };
 const FINISHED_KEPT = 20; // finished steps the Jobs tab still shows
@@ -155,6 +156,8 @@ async function osascriptFolder(): Promise<string | null> {
 export function serve(opts: {
   publishers?: Record<string, Publisher>;
   makeHost?: (env: Env, onUpload: (path: string, sent: number, size: number) => void) => Host;
+  makeLibrary?: (env: Env) => LibraryHost; // the Library tab's Bunny client
+  downloadDir?: string; // where Library downloads go
   chooseFolder?: () => Promise<string | null>;
   recentFile?: string; // folders picked so far: the only places this server reads
   envFile?: string;
@@ -164,6 +167,8 @@ export function serve(opts: {
   const {
     publishers = PUBLISHERS,
     makeHost = (env, onUpload) => new Bunny(env.BUNNY_LIBRARY_ID!, env.BUNNY_API_KEY!, { onUpload }),
+    makeLibrary = (env) => new Bunny(env.BUNNY_LIBRARY_ID!, env.BUNNY_API_KEY!),
+    downloadDir = join(homedir(), "Downloads"),
     chooseFolder = osascriptFolder,
     recentFile = join(homedir(), ".vidpub", "ui.json"),
     envFile = join(import.meta.dirname, "..", ".env"),
@@ -179,9 +184,9 @@ export function serve(opts: {
   // be open in one Chrome). The lanes run side by side, so a 15 s send doesn't wait behind an hours-long upload.
   let queue: Live[] = [];
   let nextId = 1;
-  const laneOf = (q: Live) => (q.step === "upload" ? "upload" : "send");
-  const busy = { upload: false, send: false };
-  type Phases = { upload?: () => Promise<string>; publish?: () => Promise<string> };
+  const laneOf = (q: Live) => (q.step === "publish" ? "send" : q.step); // upload | send | download
+  const busy = { upload: false, send: false, download: false };
+  type Phases = { upload?: () => Promise<string>; publish?: () => Promise<string>; download?: () => Promise<string> };
   const works = new Map<number, Phases>();
   const clients = new Set<ServerResponse>();
 
@@ -271,7 +276,7 @@ export function serve(opts: {
 
   /** Start the next queued step in each lane that's free. */
   function pump() {
-    for (const lane of ["upload", "send"] as const) {
+    for (const lane of ["upload", "send", "download"] as const) {
       if (busy[lane]) continue;
       const cur = queue.find((q) => q.state === "queued" && laneOf(q) === lane);
       if (!cur) continue;
@@ -371,6 +376,57 @@ export function serve(opts: {
     await publishPost(now.job, publishers, track(cur, now.job).onEvent);
     return Object.values(readPost(dir).published ?? {}).join(" ");
   };
+
+  /** The Library tab's Bunny client; the keys are read now, so Settings changes apply without a restart. */
+  function library() {
+    const env = readEnv();
+    if (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY) throw fail(400, "Add your Bunny library ID and API key in Settings first.");
+    return makeLibrary(env);
+  }
+
+  // Popularity checks every video's stats (one API call each), so results are kept for a while and only one
+  // computation per period runs at a time; the page polls progress.
+  const POPULAR_TTL = 6 * 3600_000;
+  const popular = new Map<number, { at: number; data?: Awaited<ReturnType<typeof popularity>>; running?: Promise<unknown>; done: number; total: number; error?: string }>();
+  function getPopular(days: number, refresh: boolean) {
+    const cur = popular.get(days);
+    if (cur?.running || (cur?.data && !refresh && Date.now() - cur.at < POPULAR_TTL)) return cur;
+    const entry: NonNullable<typeof cur> = { at: Date.now(), data: cur?.data, done: 0, total: 0 };
+    entry.running = popularity(library(), days, (done, total) => Object.assign(entry, { done, total }))
+      .then((data) => Object.assign(entry, { data, at: Date.now(), error: undefined }), (e: Error) => (entry.error = e.message))
+      .finally(() => (entry.running = undefined));
+    popular.set(days, entry);
+    return entry;
+  }
+
+  /** Queue a 1080p download of one library video into downloadDir. */
+  async function queueDownload(id: unknown) {
+    const lib = library();
+    const { video } = await videoDetails(lib, String(id)); // checks the id, and names the row
+    const jobPath = join(downloadDir, `.vidpub-download-${video.id}`); // unique per video: never queued twice
+    busyWith(jobPath);
+    const cur: Live = {
+      id: nextId++, dir: downloadDir, jobPath, step: "download", state: "queued", added: Date.now(), title: video.title,
+      videos: [{ name: video.title, label: "waiting", pct: null }], publish: [], links: [], log: [],
+    };
+    enqueue(cur, {
+      download: async () => {
+        const row = cur.videos[0];
+        Object.assign(row, { label: "downloading", pct: 0 });
+        push();
+        let last = -1;
+        const saved = await download(lib, video.id, downloadDir, (pct) => {
+          if (pct === last) return;
+          last = pct;
+          row.pct = pct;
+          push();
+        });
+        Object.assign(row, { label: `saved (${saved.height}p, ${saved.via})`, pct: 100, status: 4 });
+        console.log(`saved ${saved.path}`);
+        return saved.path;
+      },
+    });
+  }
 
   /** The job's saved post, with what each publisher already did. */
   function readPost(dir: string) {
@@ -507,6 +563,35 @@ export function serve(opts: {
         const type = IMAGE_MIME[extname(file).toLowerCase()];
         if (!type || !existsSync(file) || !lstatSync(file).isFile()) throw fail(404, "not found"); // lstat: no symlinks out
         res.writeHead(200, { "content-type": type, "x-content-type-options": "nosniff", "cache-control": "no-store" }).end(readFileSync(file));
+      } else if (route === "GET /api/library/collections") {
+        json(res, 200, { collections: await listCollections(library()) });
+      } else if (route === "GET /api/library/videos") {
+        const q = url.searchParams;
+        json(res, 200, await searchVideos(library(), { search: q.get("search") ?? "", collection: q.get("collection") ?? "", page: Number(q.get("page")) || 1, orderBy: q.get("orderBy") ?? "date" }));
+      } else if (route === "GET /api/library/stats") {
+        json(res, 200, await stats(library(), 30));
+      } else if (route === "GET /api/library/popular") { // starts (or reuses) a ranking; poll until data is fresh
+        const days = Number(url.searchParams.get("days"));
+        if (![7, 30, 90].includes(days)) throw fail(400, "days: 7, 30 or 90");
+        const p = getPopular(days, url.searchParams.get("refresh") === "1");
+        json(res, 200, { running: !!p.running, done: p.done, total: p.total, error: p.error, data: p.running ? null : p.data ?? null });
+      } else if (route === "GET /api/library/video") {
+        json(res, 200, await videoDetails(library(), url.searchParams.get("id") ?? ""));
+      } else if (route === "POST /api/library/move") {
+        const { ids, collectionId, newCollection } = await body(req);
+        if (!Array.isArray(ids) || !ids.length || ids.length > 500) throw fail(400, "pick 1 to 500 videos");
+        const lib = library();
+        const name = typeof newCollection === "string" ? newCollection.trim() : "";
+        const target = name ? await lib.findOrCreateCollection(name) : String(collectionId ?? "");
+        json(res, 200, { moved: await moveVideos(lib, ids, target), collectionId: target });
+      } else if (route === "POST /api/library/download") {
+        await queueDownload((await body(req)).id);
+        json(res, 200, { ok: true, dir: downloadDir });
+      } else if (route === "POST /api/reveal") { // show a finished download in Finder
+        const p = String((await body(req)).path ?? "");
+        if (dirname(p) !== downloadDir || !existsSync(p)) throw fail(404, "not a vidpub download");
+        spawn("open", ["-R", p], { stdio: "ignore" });
+        json(res, 200, { ok: true });
       } else if (route === "POST /api/settings") {
         json(res, 200, await settings(await body(req)));
       } else {

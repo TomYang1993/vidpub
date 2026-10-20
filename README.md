@@ -148,6 +148,27 @@ CSRF), and it only reads folders picked in the dialog (remembered in `~/.vidpub/
 bundled (Chrome stays the user's own), and electron-builder producing a signed, notarized `.app`, which needs an
 Apple Developer ID ($99/yr). Without signing, users have to get past Gatekeeper by hand.
 
+## Library
+
+The **Library** tab works on everything in your Bunny Stream library, not just what vidpub uploaded:
+
+- **Last 30 days:** views, watch time, top country, views per day.
+- **Popular:** every video ranked by views over the last 7, 30 or 90 days, with the change against the period
+  before (↑ / ↓ / new), views per day, and the all-time total, plus the same totals per collection. It reads each
+  video's daily views from Bunny (one API call per video, 6 at a time), so ranking a few hundred videos takes about
+  half a minute; the result is kept for 6 hours (↻ Refresh redoes it).
+- **Videos:** search titles (Bunny searches titles only), filter by collection, sort; each row shows its collection,
+  views, watch time, length and upload date. Tick videos to **move** them to another collection, a new one, or none.
+- **A video's popup:** its numbers, views per day, **where people watch** (Bunny's heatmap: which parts get
+  watched and rewatched), top countries, and **Download**: one MP4 at 1080p (or the best below) into your Downloads
+  folder, queued in Jobs like uploads. It uses Bunny's MP4 file when the library makes them ("MP4 fallback", for
+  videos uploaded after it was enabled), otherwise copies the 1080p stream into an MP4 with ffmpeg
+  (`brew install ffmpeg`), without re-encoding. A library with token authentication, "Block direct URL file
+  access" or an Allowed domains list refuses downloads.
+
+Bunny counts plays, not people: there's no per-viewer or per-patron data. Deleting a collection on Bunny deletes
+the videos in it, so vidpub only moves videos, never deletes.
+
 ## Patreon
 
 Patreon's official API (v2) **can't create posts, set tier access or add posts to collections**. Post

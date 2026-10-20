@@ -139,6 +139,29 @@
   .qhead .qname { font-weight: 600; overflow-wrap: anywhere; }
   .qhead .qact { margin-left: auto; display: flex; gap: 6px; }
   .qhead .qact button { padding: 2px 10px; font-size: 13px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; }
+  .tile b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  svg.bars { display: block; width: 100%; height: 96px; }
+  svg.bars rect:not([fill]) { fill: var(--accent); }
+  svg.bars rect[fill]:hover + rect, svg.bars rect:hover { opacity: 0.8; }
+  svg.bars .base { stroke: var(--line); stroke-width: 1; }
+  svg.bars.spark { width: 120px; height: 24px; }
+  .delta { font-weight: 600; font-size: 13px; }
+  .delta.ok { color: var(--ok); } .delta.bad { color: var(--bad); }
+  #pop-days { width: auto; }
+  .axis { justify-content: space-between; font-size: 12px; margin-top: 4px; }
+  h3.sub { font-size: 13px; font-weight: 600; margin: 18px 0 8px; }
+  .lib-tools { flex-wrap: nowrap; }
+  .lib-tools input[type="search"] { flex: 1; width: auto; font: inherit; padding: 8px 10px; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 6px; }
+  .lib-tools select { width: auto; }
+  .lib-move { margin-top: 12px; padding: 8px 12px; background: var(--field); border: 1px solid var(--line); border-radius: 8px; }
+  .lib-move select, .lib-move input { width: auto; }
+  .lib-table { margin-top: 12px; }
+  .lib-table th:first-child, .lib-table td:first-child { width: 28px; }
+  .ltitle button { text-align: left; color: var(--fg); padding: 0; border: 0; background: none; font: inherit; overflow-wrap: anywhere; }
+  .ltitle button:hover { color: var(--accent); }
+  .numc { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; font-weight: 550; color: var(--muted); font-size: 12px; padding: 0 8px 8px 0; }
   td { padding: 9px 8px 9px 0; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
@@ -157,6 +180,7 @@
   <nav>
     <button data-tab="new" aria-current="page">New job</button>
     <button data-tab="jobs">Jobs</button>
+    <button data-tab="library">Library</button>
     <button data-tab="settings">Settings</button>
   </nav>
 </header>
@@ -251,6 +275,59 @@
     </section>
   </div>
 
+  <div id="tab-library" hidden>
+    <section class="card">
+      <div class="row" style="justify-content: space-between"><h2 style="margin: 0">Last 30 days</h2>
+        <button type="button" id="lib-refresh" class="linkish">↻ Refresh</button></div>
+      <div id="lib-stats" style="margin-top: 12px"></div>
+    </section>
+    <section class="card">
+      <div class="row" style="justify-content: space-between">
+        <h2 style="margin: 0">Popular</h2>
+        <div class="row" style="gap: 8px">
+          <select id="pop-days" aria-label="Period"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
+          <button type="button" id="pop-refresh">↻ Refresh</button>
+        </div>
+      </div>
+      <p class="hint" id="pop-status" role="status" style="margin: 8px 0 0"></p>
+      <div id="pop-body" hidden>
+        <table class="lib-table">
+          <thead><tr><th class="numc">#</th><th>Video</th><th>Collection</th><th class="numc">Views</th><th class="numc">vs before</th><th>Per day</th><th class="numc">All time</th></tr></thead>
+          <tbody id="pop-videos"></tbody>
+        </table>
+        <h3 class="sub">By collection</h3>
+        <table class="lib-table">
+          <thead><tr><th>Collection</th><th class="numc">Videos</th><th class="numc">Views</th><th class="numc">vs before</th></tr></thead>
+          <tbody id="pop-colls"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Videos</h2>
+      <div class="row lib-tools">
+        <input type="search" id="lib-search" placeholder="Search titles" aria-label="Search titles" autocomplete="off">
+        <select id="lib-coll" aria-label="Collection"></select>
+        <select id="lib-order" aria-label="Sort"><option value="date">Newest</option><option value="title">Title</option></select>
+      </div>
+      <div class="row lib-move" id="lib-movebar" hidden>
+        <b id="lib-sel"></b> <span>Move to</span>
+        <select id="lib-move-to" aria-label="Move to collection"></select>
+        <input type="text" id="lib-new" placeholder="New collection name" aria-label="New collection name" hidden>
+        <button type="button" id="lib-move">Move</button>
+      </div>
+      <table class="lib-table">
+        <thead><tr><th><input type="checkbox" id="lib-all" aria-label="Select all on this page"></th><th>Title</th><th>Collection</th>
+          <th class="numc">Views</th><th class="numc">Watched</th><th class="numc">Length</th><th>Uploaded</th></tr></thead>
+        <tbody id="lib-rows"></tbody>
+      </table>
+      <p class="hint" id="lib-empty" hidden>No videos match.</p>
+      <div class="row" style="margin-top: 12px">
+        <button type="button" id="lib-prev">← Prev</button> <span class="hint" id="lib-count"></span> <button type="button" id="lib-next">Next →</button>
+      </div>
+      <div class="errors" id="lib-error" role="alert"></div>
+    </section>
+  </div>
+
   <div id="tab-settings" hidden>
     <section class="card">
       <h2>Bunny Stream</h2>
@@ -266,6 +343,14 @@
     </section>
   </div>
 </main>
+
+    <dialog id="vid-dlg" class="pop" aria-labelledby="v-head">
+      <div class="dlg-body">
+        <div class="row" style="justify-content: space-between; flex-wrap: nowrap"><h2 id="v-head" style="margin: 0; text-transform: none; letter-spacing: 0; font-size: 17px; color: var(--fg); overflow-wrap: anywhere"></h2>
+          <button type="button" id="v-x" aria-label="Close" class="linkish">✕</button></div>
+        <div id="v-body"></div>
+      </div>
+    </dialog>
 
     <dialog id="job-dlg" class="pop" aria-labelledby="j-head">
       <div class="dlg-body">
@@ -323,8 +408,9 @@ async function api(path, body) {
 // ---- tabs
 function show(tab) {
   for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
-  for (const t of ["new", "jobs", "settings"]) $(`tab-${t}`).hidden = t !== tab;
+  for (const t of ["new", "jobs", "library", "settings"]) $(`tab-${t}`).hidden = t !== tab;
   if (tab === "jobs") loadJobs().catch((e) => alert(e.message));
+  if (tab === "library" && !lib.loaded) loadLibrary().then(() => loadPopular());
 }
 for (const b of document.querySelectorAll("nav button")) b.onclick = () => show(b.dataset.tab);
 
@@ -671,10 +757,14 @@ function renderQueue() {
 function phase(q, pos = 0) {
   if (q.state === "done") return ["done", "ok"];
   if (q.state === "failed") return [q.step === "publish" ? "send failed" : "failed", "bad"];
+  if (q.step === "download") return q.state === "running" ? ["downloading", "run"] : [`queued${pos ? ` · ${pos} ahead` : ""}`, ""];
   if (q.step === "upload") return q.state === "running" ? ["uploading", "run"] : [`queued${pos ? ` · ${pos} ahead` : ""}`, ""];
   return q.state === "running" ? ["sending", "run"] : [`waiting to send${pos ? ` · ${pos} ahead` : ""}`, ""];
 }
 const resultLink = (q) => {
+  if (q.step === "download" && q.state === "done") {
+    return el("button", { type: "button", textContent: "Show in Finder", onclick: () => api("/api/reveal", { path: q.result }).catch((e) => alert(e.message)) });
+  }
   const url = q.state === "done" && (q.result ?? "").split(" ").find((u) => /^https:\/\//.test(u));
   return url ? link(url, /\/edit$/.test(url) ? "Open the draft" : "Open the post") : null;
 };
@@ -684,14 +774,14 @@ function queueRow(q, pos) {
   const act = (text, fn) => el("button", { type: "button", textContent: text, onclick: () => fn().catch((e) => alert(e.message)) });
   const actions = [
     resultLink(q),
-    q.state === "queued" && q.step === "upload" && act("Cancel", () => api("/api/cancel", { id: q.id })),
+    q.state === "queued" && q.step !== "publish" && act("Cancel", () => api("/api/cancel", { id: q.id })),
     q.state === "failed" && q.step === "publish" && act("Send again", () => api("/api/publish", { dir: q.dir })),
     q.state === "failed" && /edited by hand/.test(q.error ?? "") && act("Discard post edits and rebuild", () => api("/api/start", { dir: q.dir, rebuild: true })),
     act("Details", async () => openJobDialog(q.id)),
   ].filter(Boolean);
   return el("div", { className: "qentry" },
     el("div", { className: "qhead" },
-      el("span", { className: "qname", textContent: q.dir.split("/").pop() }),
+      el("span", { className: "qname", textContent: q.title ?? q.dir.split("/").pop() }),
       el("span", { className: `tag ${cls}`, textContent: tag }),
       el("span", { className: "qact" }, ...actions)),
     q.error ? el("div", { className: "errors", style: "margin-top: 6px", textContent: q.error }) : null);
@@ -711,7 +801,7 @@ function renderJobDialog() {
   const q = queue.find((x) => x.id === jobDialogId);
   if (!q) return $("job-dlg").close(); // dropped out of the queue
   const [tag, cls] = phase(q);
-  $("j-head").replaceChildren(`${q.dir.split("/").pop()} `, el("span", { className: `tag ${cls}`, textContent: tag }));
+  $("j-head").replaceChildren(`${q.title ?? q.dir.split("/").pop()} `, el("span", { className: `tag ${cls}`, textContent: tag }));
   const rows = q.videos.map((v) => {
     const ready = v.status === 4 || v.status === 8;
     const bad = v.status === 5 || v.status === 6 || v.status === null;
@@ -980,6 +1070,236 @@ $("t-delete").onclick = async () => {
     $("t-errors").textContent = e.message;
   }
 };
+
+// ---- library: every video in the Bunny library, its collection and stats; move, download
+const lib = { page: 1, total: 0, items: [], collections: [], selected: new Set(), loaded: false };
+const dur = (s) => { // seconds -> 1:02:03 / 4:05
+  s = Math.round(s || 0);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`;
+};
+const hours = (s) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round((s || 0) / 60)} min`);
+const num = (n) => (n || 0).toLocaleString();
+const collName = (id) => (id ? lib.collections.find((c) => c.id === id)?.name ?? "(unknown collection)" : "—");
+
+/** Thin single-series bars with a hover tooltip per bar; the numbers are also shown as text elsewhere. */
+function bars(values, { tip, label, small } = {}) {
+  const W = small ? 120 : 600, H = small ? 24 : 96, n = Math.max(values.length, 1), gap = Math.min(2, (W / n) * 0.3), w = Math.max(0.5, W / n - gap);
+  const max = Math.max(1, ...values);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none"); // fill the width; bars stretch, they don't distort meaningfully
+  svg.setAttribute("class", small ? "bars spark" : "bars");
+  svg.setAttribute("role", "img");
+  if (label) svg.setAttribute("aria-label", label);
+  values.forEach((v, i) => {
+    const h = v ? Math.max(2, (v / max) * (H - 4)) : 0;
+    const r = document.createElementNS(svg.namespaceURI, "rect");
+    Object.entries({ x: i * (W / n) + gap / 2, y: H - h, width: w, height: h, rx: Math.min(2, w / 2) }).forEach(([k, x]) => r.setAttribute(k, x));
+    const hit = document.createElementNS(svg.namespaceURI, "rect"); // bigger than the bar: easy to hover
+    Object.entries({ x: i * (W / n), y: 0, width: W / n, height: H, fill: "transparent" }).forEach(([k, x]) => hit.setAttribute(k, x));
+    const t = document.createElementNS(svg.namespaceURI, "title");
+    t.textContent = tip ? tip(v, i) : String(v);
+    hit.append(t);
+    svg.append(r, hit);
+  });
+  const base = document.createElementNS(svg.namespaceURI, "line");
+  Object.entries({ x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5, class: "base" }).forEach(([k, x]) => base.setAttribute(k, x));
+  svg.append(base);
+  return svg;
+}
+const tile = (label, value) => el("div", { className: "tile" }, el("span", { className: "hint", textContent: label }), el("b", { textContent: value }));
+
+async function loadLibrary() {
+  $("lib-error").textContent = "";
+  try {
+    const [{ collections }, st] = await Promise.all([api("/api/library/collections"), api("/api/library/stats")]);
+    lib.collections = collections;
+    const sel = $("lib-coll").value;
+    $("lib-coll").replaceChildren(el("option", { value: "", textContent: "All videos" }),
+      ...collections.map((c) => el("option", { value: c.id, textContent: `${c.name} (${c.videoCount})` })));
+    $("lib-coll").value = sel;
+    renderMoveTargets();
+    const views = st.views.map(([, n]) => n), watch = st.watchTime.reduce((a, [, n]) => a + n, 0);
+    $("lib-stats").replaceChildren(
+      el("div", { className: "tiles" }, tile("Views", num(views.reduce((a, b) => a + b, 0))), tile("Watch time", hours(watch)),
+        tile("Top country", st.countries[0] ? `${st.countries[0][0]} · ${num(st.countries[0][1])}` : "—"), tile("Collections", num(collections.length))),
+      bars(views, { label: "Views per day, last 30 days", tip: (v, i) => `${st.views[i][0]}: ${num(v)} views` }),
+      el("div", { className: "row hint axis" }, el("span", { textContent: st.views[0]?.[0] ?? "" }), el("span", { textContent: st.views.at(-1)?.[0] ?? "" })));
+    lib.loaded = true;
+    await searchLibrary(1);
+  } catch (e) {
+    $("lib-error").textContent = e.message;
+  }
+}
+
+async function searchLibrary(page = lib.page) {
+  const q = new URLSearchParams({ search: $("lib-search").value, collection: $("lib-coll").value, orderBy: $("lib-order").value, page });
+  try {
+    const r = await api(`/api/library/videos?${q}`);
+    Object.assign(lib, { page: r.page, total: r.totalItems, items: r.items, perPage: r.perPage });
+    lib.selected.clear();
+    renderLibrary();
+  } catch (e) {
+    $("lib-error").textContent = e.message;
+  }
+}
+
+function renderLibrary() {
+  const from = (lib.page - 1) * lib.perPage;
+  $("lib-rows").replaceChildren(...lib.items.map((v) => {
+    const cb = el("input", { type: "checkbox", checked: lib.selected.has(v.id), onchange: () => { cb.checked ? lib.selected.add(v.id) : lib.selected.delete(v.id); renderMoveBar(); } });
+    cb.setAttribute("aria-label", `Select ${v.title}`);
+    return el("tr", {},
+      el("td", {}, cb),
+      el("td", { className: "ltitle" }, el("button", { type: "button", className: "linkish", textContent: v.title, onclick: () => openVideo(v.id) })),
+      el("td", { textContent: collName(v.collectionId) }),
+      el("td", { className: "numc", textContent: num(v.views) }),
+      el("td", { className: "numc", textContent: hours(v.totalWatchTime) }),
+      el("td", { className: "numc", textContent: dur(v.length) }),
+      el("td", { textContent: (v.dateUploaded ?? "").slice(0, 10) }));
+  }));
+  $("lib-empty").hidden = !!lib.items.length;
+  $("lib-count").textContent = lib.total ? `${num(from + 1)}–${num(from + lib.items.length)} of ${num(lib.total)}` : "";
+  $("lib-prev").disabled = lib.page <= 1;
+  $("lib-next").disabled = from + lib.items.length >= lib.total;
+  $("lib-all").checked = false;
+  renderMoveBar();
+}
+
+function renderMoveTargets() {
+  $("lib-move-to").replaceChildren(el("option", { value: "", textContent: "No collection" }),
+    ...lib.collections.map((c) => el("option", { value: c.id, textContent: c.name })), el("option", { value: "+new", textContent: "New collection…" }));
+}
+function renderMoveBar() {
+  $("lib-movebar").hidden = !lib.selected.size;
+  $("lib-sel").textContent = `${lib.selected.size} selected`;
+  $("lib-new").hidden = $("lib-move-to").value !== "+new";
+}
+$("lib-move-to").onchange = renderMoveBar;
+$("lib-all").onchange = () => {
+  for (const v of lib.items) $("lib-all").checked ? lib.selected.add(v.id) : lib.selected.delete(v.id);
+  renderLibrary();
+  $("lib-all").checked = lib.selected.size === lib.items.length && lib.items.length > 0;
+};
+$("lib-move").onclick = async () => {
+  const to = $("lib-move-to").value;
+  const name = to === "+new" ? $("lib-new").value.trim() : "";
+  if (to === "+new" && !name) return ($("lib-error").textContent = "Name the new collection.");
+  const label = name || (to ? collName(to) : "no collection");
+  if (!confirm(`Move ${lib.selected.size} video${lib.selected.size > 1 ? "s" : ""} to ${label}?`)) return;
+  $("lib-move").disabled = true;
+  try {
+    await api("/api/library/move", { ids: [...lib.selected], ...(name ? { newCollection: name } : { collectionId: to }) });
+    $("lib-new").value = "";
+    await loadLibrary(); // counts and names changed
+  } catch (e) {
+    $("lib-error").textContent = e.message;
+  } finally {
+    $("lib-move").disabled = false;
+  }
+};
+let searchTimer;
+$("lib-search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => searchLibrary(1), 300); };
+$("lib-coll").onchange = $("lib-order").onchange = () => searchLibrary(1);
+$("lib-prev").onclick = () => searchLibrary(lib.page - 1);
+$("lib-next").onclick = () => searchLibrary(lib.page + 1);
+$("lib-refresh").onclick = () => loadLibrary();
+
+// The video popup: its numbers, views per day, where people watch (heatmap), countries, and the 1080p download.
+async function openVideo(id) {
+  $("v-body").replaceChildren(el("p", { className: "hint", textContent: "Loading…" }));
+  $("v-head").textContent = lib.items.find((v) => v.id === id)?.title ?? "";
+  $("vid-dlg").showModal();
+  try {
+    const d = await api(`/api/library/video?id=${encodeURIComponent(id)}`);
+    const v = d.video;
+    const views = d.stats.views.map(([, n]) => n);
+    const best = Math.max(0, ...[...d.mp4, ...d.hls].map((r) => Number(/(\d+)p$/.exec(r)?.[1] ?? 0)).filter((h) => h <= 1080));
+    const seg = d.heatmap.length ? v.length / d.heatmap.length : 0;
+    const dl = el("button", { type: "button", className: "primary", textContent: best ? `Download ${best}p` : "Nothing to download yet", disabled: !best,
+      onclick: async () => {
+        dl.disabled = true;
+        try {
+          await api("/api/library/download", { id });
+          $("v-dl").textContent = "Queued: follow it in Jobs. It saves to your Downloads folder.";
+        } catch (e) {
+          $("v-dl").textContent = e.message;
+          dl.disabled = false;
+        }
+      } });
+    $("v-head").textContent = v.title;
+    $("v-body").replaceChildren(...[
+      el("p", { className: "hint", style: "margin: 2px 0 14px", textContent: `${collName(v.collectionId)} · uploaded ${(v.dateUploaded ?? "").slice(0, 10)} · ${(v.storageSize / 1e9).toFixed(2)} GB` }),
+      el("div", { className: "tiles" }, tile("Views", num(v.views)), tile("Avg watch", dur(v.averageWatchTime)), tile("Total watch", hours(v.totalWatchTime)), tile("Length", dur(v.length))),
+      el("h3", { className: "sub", textContent: "Views per day, last 30 days" }),
+      bars(views, { label: "Views per day", tip: (n, i) => `${d.stats.views[i][0]}: ${num(n)} views` }),
+      el("div", { className: "row hint axis" }, el("span", { textContent: d.stats.views[0]?.[0] ?? "" }), el("span", { textContent: d.stats.views.at(-1)?.[0] ?? "" })),
+      el("h3", { className: "sub", textContent: "Where people watch" }),
+      d.heatmap.some((n) => n) ? bars(d.heatmap, { label: "Watch heatmap", tip: (n, i) => `${dur(i * seg)}–${dur((i + 1) * seg)}: ${num(n)}` }) : el("p", { className: "hint", textContent: "No plays recorded yet." }),
+      d.heatmap.some((n) => n) ? el("div", { className: "row hint axis" }, el("span", { textContent: "0:00" }), el("span", { textContent: dur(v.length) })) : null,
+      el("h3", { className: "sub", textContent: "Top countries, last 30 days" }),
+      d.stats.countries.length ? el("table", {}, el("tbody", {}, ...d.stats.countries.slice(0, 8).map(([cc, n]) => el("tr", {}, el("td", { textContent: cc }), el("td", { className: "numc", textContent: num(n) })))))
+        : el("p", { className: "hint", textContent: "No views in the last 30 days." }),
+      el("h3", { className: "sub", textContent: "Download" }),
+      el("p", { className: "hint", textContent: `MP4 files: ${d.mp4.join(", ") || "none"} · stream: ${d.hls.join(", ") || "none"}` }),
+      el("div", { className: "row" }, dl, el("span", { className: "hint", id: "v-dl", role: "status" })),
+    ].filter(Boolean));
+  } catch (e) {
+    $("v-body").replaceChildren(el("p", { className: "errors", textContent: e.message }));
+  }
+}
+$("v-x").onclick = () => $("vid-dlg").close();
+
+// ---- popular: which videos get watched over a period, and how that changed against the period before
+const change = (now, before) => {
+  if (!before) return now ? ["new", "ok"] : ["—", ""];
+  const pct = Math.round(((now - before) / before) * 100);
+  return pct === 0 ? ["→ 0%", ""] : pct > 0 ? [`↑ ${pct}%`, "ok"] : [`↓ ${-pct}%`, "bad"];
+};
+const changeCell = (now, before) => {
+  const [text, cls] = change(now, before);
+  return el("td", { className: "numc" }, el("span", { className: `delta ${cls}`, textContent: text, title: `${num(now)} vs ${num(before)} the period before` }));
+};
+let popTimer;
+async function loadPopular(refresh = false) {
+  clearTimeout(popTimer);
+  const days = $("pop-days").value;
+  try {
+    const r = await api(`/api/library/popular?days=${days}${refresh ? "&refresh=1" : ""}`);
+    if (r.running) {
+      $("pop-status").textContent = r.total ? `Checking ${num(r.done)} of ${num(r.total)} videos…` : "Listing videos…";
+      $("pop-refresh").disabled = true;
+      popTimer = setTimeout(() => loadPopular(), 1000);
+      return;
+    }
+    $("pop-refresh").disabled = false;
+    if (r.error) return ($("pop-status").textContent = r.error);
+    renderPopular(r.data);
+  } catch (e) {
+    $("pop-status").textContent = e.message;
+  }
+}
+function renderPopular(p) {
+  if (!p) return;
+  $("pop-status").textContent = `${p.from} to ${p.to} · ${num(p.checked)} videos · updated ${new Date(p.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  $("pop-videos").replaceChildren(...p.videos.slice(0, 25).map((v, i) => el("tr", {},
+    el("td", { className: "numc hint", textContent: String(i + 1) }),
+    el("td", { className: "ltitle" }, el("button", { type: "button", textContent: v.title, onclick: () => openVideo(v.id) })),
+    el("td", { textContent: collName(v.collectionId) }),
+    el("td", { className: "numc", textContent: num(v.views) }),
+    changeCell(v.views, v.prev),
+    el("td", {}, bars(v.daily, { small: true, label: `${v.title}: views per day`, tip: (n, d) => `day ${d + 1}: ${num(n)} views` })),
+    el("td", { className: "numc hint", textContent: num(v.total) }))));
+  $("pop-colls").replaceChildren(...p.collections.slice(0, 15).map((c) => el("tr", {},
+    el("td", { textContent: c.collectionId ? collName(c.collectionId) : "(no collection)" }),
+    el("td", { className: "numc hint", textContent: num(c.videos) }),
+    el("td", { className: "numc", textContent: num(c.views) }),
+    changeCell(c.views, c.prev))));
+  $("pop-body").hidden = false;
+}
+$("pop-days").onchange = () => loadPopular();
+$("pop-refresh").onclick = () => loadPopular(true);
 
 // ---- jobs
 async function loadJobs() {

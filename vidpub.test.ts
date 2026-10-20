@@ -1,11 +1,12 @@
 // No network: npm test
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
 import { contentHtml, type PostDoc } from "./publishers.ts";
+import { download, moveVideos, pickVariant, popularity, searchVideos } from "./library.ts";
 import { BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate } from "./templates.ts";
 import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
 
@@ -227,4 +228,94 @@ test("old post.content fails with the template to use instead", () => {
 test("post HTML: escaped, URLs linked", () => {
   assert.equal(contentHtml('<b> & "x"\nhttps://p.net/a?b=1&c=2'),
     '<p>&#60;b&#62; &#38; &#34;x&#34;</p><p><a href="https://p.net/a?b=1&#38;c=2">https://p.net/a?b=1&#38;c=2</a></p>');
+});
+
+/** A fake library: records API calls, answers from `videos`, serves `files` as CDN responses. */
+function fakeLibrary(files: Record<string, Response | (() => Response)> = {}) {
+  const calls: [string, string, object?][] = [];
+  const id = "11111111-2222-4333-8444-555555555555";
+  const video = { guid: id, title: 'Clip: "one"/two.mp4', collectionId: "", views: 3, length: 10, thumbnailUrl: "https://vz-x.b-cdn.net/11111111-2222-4333-8444-555555555555/thumbnail.jpg" };
+  const lib = {
+    calls, id,
+    async api(method: string, path: string, body?: object) {
+      calls.push([method, path, body]);
+      if (path.startsWith("/videos?")) return { totalItems: 1, currentPage: 1, itemsPerPage: 50, items: [video] };
+      if (path === `/videos/${id}`) return method === "GET" ? video : {};
+      if (path.startsWith("/statistics")) return { viewsChart: { "2026-10-18T00:00:00Z": 2 }, watchTimeChart: {}, countryViewCounts: { US: 2 }, engagementScore: 0 };
+      if (path.endsWith("/heatmap")) return { heatmap: { 1: 5, 0: 9 } };
+      if (path.endsWith("/resolutions")) return { data: { mp4Resolutions: [{ resolution: "720p" }, { resolution: "1080p" }], playlistResolutions: [{ resolution: "1080p" }] } };
+      throw new Error(`unexpected ${method} ${path}`);
+    },
+    async fetch(url: string) {
+      const f = files[url];
+      return typeof f === "function" ? f() : f ?? new Response("nope", { status: 404 });
+    },
+    async findOrCreateCollection() { return "c"; },
+  };
+  return lib;
+}
+
+test("library: search params, move takes ids and empty collection, rejects non-ids before calling Bunny", async () => {
+  const lib = fakeLibrary();
+  const page = await searchVideos(lib, { search: " clip ", collection: lib.id, page: 2, orderBy: "title" });
+  assert.equal(page.items[0].id, lib.id);
+  assert.match(lib.calls[0][1], /search=clip.*|collection=/);
+  assert.ok(lib.calls[0][1].includes("orderBy=title") && lib.calls[0][1].includes("page=2"));
+  await assert.rejects(searchVideos(lib, { collection: "../../x" }), /not a collection id/);
+  lib.calls.length = 0;
+  assert.equal(await moveVideos(lib, [lib.id], ""), 1);
+  assert.deepEqual(lib.calls, [["POST", `/videos/${lib.id}`, { collectionId: "" }]]);
+  await assert.rejects(moveVideos(lib, ["x/../../collections/y"], ""), /not a video id/);
+});
+
+test("library: HLS variant pick prefers 1080p, else the best below it", () => {
+  const m = (...hs: number[]) => hs.map((h, i) => `#EXT-X-STREAM-INF:BANDWIDTH=${i},RESOLUTION=${(h * 16) / 9}x${h}\n${h}p/video.m3u8`).join("\n");
+  assert.deepEqual(pickVariant(m(360, 1080, 720), "https://cdn/v/playlist.m3u8"), { height: 1080, url: "https://cdn/v/1080p/video.m3u8" });
+  assert.equal(pickVariant(m(480, 720, 1440), "https://cdn/v/playlist.m3u8")!.height, 720);
+  assert.equal(pickVariant(m(1440, 2160), "https://cdn/v/playlist.m3u8")!.height, 1440); // nothing at or under 1080
+  assert.equal(pickVariant("#EXTM3U", "https://cdn/v/playlist.m3u8"), null);
+});
+
+test("library download: the 1080p MP4 lands under a safe new name with progress; a 403 explains itself and leaves nothing", async () => {
+  const dir = join(tmp, "dl");
+  mkdirSync(dir);
+  const url = "https://vz-x.b-cdn.net/11111111-2222-4333-8444-555555555555/play_1080p.mp4";
+  const lib = fakeLibrary({ [url]: () => new Response("0123456789", { headers: { "content-length": "10" } }) });
+  const seen: number[] = [];
+  const saved = await download(lib, lib.id, dir, (p) => seen.push(p));
+  assert.equal(saved.path, join(dir, "Clip_ _one_two.mp4"));
+  assert.equal(readFileSync(saved.path, "utf8"), "0123456789");
+  assert.equal(saved.height, 1080);
+  assert.equal(seen.at(-1), 100);
+  assert.equal((await download(lib, lib.id, dir)).path, join(dir, "Clip_ _one_two 2.mp4")); // never overwrites
+  const locked = fakeLibrary({ [url]: new Response("", { status: 403 }) });
+  await assert.rejects(download(locked, locked.id, dir), /refused the download.*Block direct URL/);
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".part")), []);
+  assert.ok(!existsSync(join(dir, "Clip_ _one_two 3.mp4")));
+});
+
+test("popularity: views this period vs the one before, ranked; collections summed", async () => {
+  const day = (ago: number) => new Date(Date.now() - ago * 86_400_000).toISOString().slice(0, 10);
+  const [a, b, c] = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((p) => `${p}-0000-4000-8000-000000000000`);
+  const videos = [{ guid: a, title: "A", collectionId: "c1", views: 50 }, { guid: b, title: "B", collectionId: "c1", views: 9 }, { guid: c, title: "C", collectionId: "", views: 1 }];
+  const charts: Record<string, Record<string, number>> = { // last 7 days = this period, the 7 before = previous
+    [a]: { [`${day(10)}T00:00:00Z`]: 8, [`${day(1)}T00:00:00Z`]: 2 },
+    [b]: { [`${day(0)}T00:00:00Z`]: 5, [`${day(3)}T00:00:00Z`]: 1 },
+    [c]: {},
+  };
+  const lib = {
+    async api(_m: string, path: string) {
+      if (path.startsWith("/videos?")) return { totalItems: 3, items: videos };
+      return { viewsChart: charts[new URLSearchParams(path.split("?")[1]).get("videoGuid")!] };
+    },
+    async fetch() { return new Response(); },
+    async findOrCreateCollection() { return ""; },
+  };
+  const seen: number[] = [];
+  const p = await popularity(lib, 7, (done) => seen.push(done));
+  assert.deepEqual(p.videos.map((v) => [v.title, v.views, v.prev]), [["B", 6, 0], ["A", 2, 8], ["C", 0, 0]]);
+  assert.equal(p.videos[0].daily.length, 7);
+  assert.equal(p.videos[0].daily.at(-1), 5); // today is the last day
+  assert.deepEqual(p.collections.map((x) => [x.collectionId, x.videos, x.views, x.prev]), [["c1", 2, 8, 8], ["", 1, 0, 0]]);
+  assert.deepEqual(seen.sort(), [1, 2, 3]);
 });
