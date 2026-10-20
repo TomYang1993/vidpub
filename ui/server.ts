@@ -17,7 +17,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
 import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
-import { download, listCollections, moveVideos, popularity, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
+import { deleteVideos, download, listCollections, moveVideos, popularity, proposeCleanup, readDeleted, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
 import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
 import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
@@ -158,6 +158,7 @@ export function serve(opts: {
   makeHost?: (env: Env, onUpload: (path: string, sent: number, size: number) => void) => Host;
   makeLibrary?: (env: Env) => LibraryHost; // the Library tab's Bunny client
   downloadDir?: string; // where Library downloads go
+  deletedLog?: string; // every video deleted from the Library tab, one JSON line each
   chooseFolder?: () => Promise<string | null>;
   recentFile?: string; // folders picked so far: the only places this server reads
   envFile?: string;
@@ -169,6 +170,7 @@ export function serve(opts: {
     makeHost = (env, onUpload) => new Bunny(env.BUNNY_LIBRARY_ID!, env.BUNNY_API_KEY!, { onUpload }),
     makeLibrary = (env) => new Bunny(env.BUNNY_LIBRARY_ID!, env.BUNNY_API_KEY!),
     downloadDir = join(homedir(), "Downloads"),
+    deletedLog = join(homedir(), ".vidpub", "deleted.jsonl"),
     chooseFolder = osascriptFolder,
     recentFile = join(homedir(), ".vidpub", "ui.json"),
     envFile = join(import.meta.dirname, "..", ".env"),
@@ -399,6 +401,21 @@ export function serve(opts: {
     return entry;
   }
 
+  /** Bunny videos used in a vidpub job's Patreon post (from the state files in picked folders): id -> folder name. */
+  function postedVideos() {
+    const posted = new Map<string, string>();
+    for (const dir of recent.filter((d) => existsSync(d))) {
+      for (const f of readdirSync(dir).filter((f) => f.endsWith(".state.json"))) {
+        try {
+          const state = JSON.parse(readFileSync(join(dir, f), "utf8"));
+          if (!Object.keys(state.published ?? {}).length) continue; // never posted: not in any post
+          for (const rec of Object.values(state.videos ?? {}) as { guid?: string }[]) if (rec.guid) posted.set(rec.guid, basename(dir));
+        } catch {} // an unreadable state file names no videos
+      }
+    }
+    return posted;
+  }
+
   /** Queue a 1080p download of one library video into downloadDir. */
   async function queueDownload(id: unknown) {
     const lib = library();
@@ -575,6 +592,24 @@ export function serve(opts: {
         if (![7, 30, 90].includes(days)) throw fail(400, "days: 7, 30 or 90");
         const p = getPopular(days, url.searchParams.get("refresh") === "1");
         json(res, 200, { running: !!p.running, done: p.done, total: p.total, error: p.error, data: p.running ? null : p.data ?? null });
+      } else if (route === "GET /api/library/cleanup") { // a proposal from the popularity data (computed if needed)
+        const q = url.searchParams;
+        const days = Number(q.get("days"));
+        if (![30, 90].includes(days)) throw fail(400, "days: 30 or 90");
+        const int = (k: string, min: number, max: number) => Math.min(max, Math.max(min, Math.floor(Number(q.get(k)) || 0)));
+        const p = getPopular(days, false);
+        if (p.running || !p.data) return json(res, 200, { running: !!p.running, done: p.done, total: p.total, error: p.error, proposal: null });
+        const rules = { maxViews: int("maxViews", 0, 1e6), minAgeDays: int("minAge", 0, 3650), limit: int("limit", 1, 200) };
+        json(res, 200, { running: false, proposal: proposeCleanup(p.data, rules, { posted: postedVideos(), includePosted: q.get("includePosted") === "1" }) });
+      } else if (route === "POST /api/library/delete") { // permanent: the page makes you type the count first
+        const { ids, confirm, reasons } = await body(req);
+        if (!Array.isArray(ids) || !ids.length || ids.length > 200) throw fail(400, "pick 1 to 200 videos");
+        if (String(confirm) !== String(ids.length)) throw fail(400, `type ${ids.length} to confirm`);
+        const r = await deleteVideos(library(), ids, deletedLog, reasons && typeof reasons === "object" ? reasons : {});
+        popular.clear(); // the rankings listed these videos
+        json(res, 200, r);
+      } else if (route === "GET /api/library/deleted") {
+        json(res, 200, readDeleted(deletedLog));
       } else if (route === "GET /api/library/video") {
         json(res, 200, await videoDetails(library(), url.searchParams.get("id") ?? ""));
       } else if (route === "POST /api/library/move") {

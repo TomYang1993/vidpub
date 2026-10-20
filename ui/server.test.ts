@@ -66,7 +66,7 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
 
 /** A GUI server over folders `names` (each with <name>.mp4) in a temp dir, with a Bunny whose uploads wait for
  *  gate(name) and that says "ready" once uploaded. Talks to it like the page does. */
-async function queueServer(names: string[], publishers: Record<string, (doc: { title: string }) => string | Promise<string>>) {
+async function queueServer(names: string[], publishers: Record<string, (doc: { title: string }) => string | Promise<string>>, extra: object = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-q-")));
   const dirs = names.map((n) => (mkdirSync(join(root, n)), writeFileSync(join(root, n, `${n}.mp4`), "x"), join(root, n)));
   writeFileSync(join(root, "ui.json"), JSON.stringify({ folders: dirs }));
@@ -90,7 +90,7 @@ async function queueServer(names: string[], publishers: Record<string, (doc: { t
   });
   const { server, url } = await serve({
     recentFile: join(root, "ui.json"), envFile: join(root, "env"), chooseFolder: async () => null,
-    makeHost: makeHost as never, publishers: publishers as never, patreonCache: () => null,
+    makeHost: makeHost as never, publishers: publishers as never, patreonCache: () => null, ...extra,
   });
   const { origin, searchParams } = new URL(url);
   const headers = { "x-vidpub-token": searchParams.get("t")!, origin, "content-type": "application/json" };
@@ -114,7 +114,8 @@ async function queueServer(names: string[], publishers: Record<string, (doc: { t
   const close = () => (server.close(), server.closeAllConnections());
   const upload = (dir: string, name: string, body: string) =>
     fetch(`${origin}/api/thumbnail?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, { method: "POST", headers, body });
-  return { dirs, gate, uploads, post, queue, until, form, close, upload };
+  const get = (path: string) => fetch(`${origin}${path}`, { headers });
+  return { dirs, gate, uploads, post, queue, until, form, close, upload, get, root };
 }
 
 test("queue: one upload at a time, a job is never queued twice, only queued steps cancel, the next one runs after", async () => {
@@ -182,6 +183,55 @@ test("thumbnail upload: copied into the job folder under a safe name, images onl
     assert.equal((await upload(a, "notes.txt", "x")).status, 400);
     assert.equal((await upload(a, ".hidden.png", "x")).status, 400);
     assert.equal((await upload(tmpdir(), "x.png", "x")).status, 403); // not a picked folder
+  } finally {
+    close();
+  }
+});
+
+test("cleanup: proposal leaves out videos used in a vidpub post; delete needs the typed count and logs what went", async () => {
+  const [old, posted, fresh] = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((x) => `${x}-0000-4000-8000-000000000000`);
+  const long = new Date(Date.now() - 400 * 86_400_000).toISOString();
+  const videos = [
+    { guid: old, title: "old", collectionId: "", views: 2, storageSize: 5e9, dateUploaded: long },
+    { guid: posted, title: "posted", collectionId: "", views: 0, storageSize: 9e9, dateUploaded: long },
+    { guid: fresh, title: "fresh", collectionId: "", views: 0, storageSize: 1e9, dateUploaded: new Date().toISOString() },
+  ];
+  const gone: string[] = [];
+  const lib = {
+    async api(method: string, path: string) {
+      if (path.startsWith("/videos?")) return { totalItems: videos.length, items: videos };
+      if (path.startsWith("/statistics")) return { viewsChart: {}, watchTimeChart: {} };
+      const v = videos.find((x) => path === `/videos/${x.guid}`)!;
+      if (method === "DELETE") return void gone.push(v.guid);
+      return v;
+    },
+    async fetch() { return new Response(); },
+    async findOrCreateCollection() { return ""; },
+  };
+  const log = join(realpathSync(mkdtempSync(join(tmpdir(), "vidpub-del-"))), "deleted.jsonl");
+  const { dirs: [a], get, post, close } = await queueServer(["a"], {}, { makeLibrary: () => lib, deletedLog: log });
+  writeFileSync(join(a, "job.json.state.json"), JSON.stringify({ videos: { x: { guid: posted } }, published: { patreon_browser: "https://draft" } }));
+  try {
+    const proposal = async (extra = "") => {
+      for (let i = 0; i < 100; i++) {
+        const r = await (await get(`/api/library/cleanup?days=90&maxViews=0&minAge=60&limit=20${extra}`)).json();
+        if (r.proposal) return r.proposal;
+        await new Promise((ok) => setTimeout(ok, 20));
+      }
+      throw new Error("no proposal");
+    };
+    let p = await proposal();
+    assert.deepEqual(p.videos.map((v: { id: string }) => v.id), [old]); // posted: protected; fresh: too new
+    assert.equal(p.skippedPosted, 1);
+    p = await proposal("&includePosted=1");
+    assert.deepEqual(p.videos.map((v: { id: string; post: string }) => [v.id, v.post]), [[posted, "a"], [old, null]]); // biggest first
+    const wrong = await post("/api/library/delete", { ids: [old], confirm: "yes" });
+    assert.equal(wrong.status, 400);
+    assert.deepEqual(gone, []);
+    const ok = await (await post("/api/library/delete", { ids: [old], confirm: 1, reasons: { [old]: "no views in the last 90 days" } })).json();
+    assert.deepEqual([ok.deleted, gone], [[old], [old]]);
+    const h = await (await get("/api/library/deleted")).json();
+    assert.deepEqual([h.count, h.bytes, h.recent[0].title, h.recent[0].reason], [1, 5e9, "old", "no views in the last 90 days"]);
   } finally {
     close();
   }

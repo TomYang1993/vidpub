@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
 import { contentHtml, type PostDoc } from "./publishers.ts";
-import { download, moveVideos, pickVariant, popularity, searchVideos } from "./library.ts";
+import { deleteVideos, download, moveVideos, pickVariant, popularity, proposeCleanup, readDeleted, searchVideos } from "./library.ts";
 import { BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate } from "./templates.ts";
 import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
 
@@ -321,4 +321,53 @@ test("popularity: views this period vs the one before, ranked; collections summe
   assert.equal(p.videos[0].watch, 300);
   assert.deepEqual(p.collections.map((x) => [x.collectionId, x.videos, x.views, x.prev, x.watch]), [["c1", 2, 8, 8, 300], ["", 1, 0, 0, 0]]);
   assert.deepEqual(seen.sort(), [1, 2, 3]);
+});
+
+test("cleanup proposal: rules, least-viewed then biggest first, reasons, posted videos kept out unless asked", () => {
+  const now = new Date("2026-10-19T12:00:00Z");
+  const ago = (d: number) => new Date(now.getTime() - d * 86_400_000).toISOString();
+  const v = (id: string, views: number, total: number, size: number, age: number) =>
+    ({ id, title: id, collectionId: "", views, prev: 0, total, size, dateUploaded: ago(age), length: 60, daily: [], watch: 0 });
+  const p = { days: 90, from: "", to: "", at: "", checked: 6, collections: [], videos: [
+    v("big-unwatched", 0, 3, 5e9, 200), v("small-unwatched", 0, 0, 1e8, 200), v("one-view", 1, 9, 9e9, 300),
+    v("popular", 50, 500, 9e9, 300), v("too-new", 0, 0, 9e9, 10), v("in-a-post", 0, 0, 8e9, 400)] };
+  const posted = new Map([["in-a-post", "Oct 03 posts"]]);
+  const r = proposeCleanup(p as never, { maxViews: 1, minAgeDays: 60, limit: 10 }, { posted, now });
+  assert.deepEqual(r.videos.map((x) => x.id), ["big-unwatched", "small-unwatched", "one-view"]);
+  assert.deepEqual(r.videos[0].reasons, ["no views in the last 90 days", "3 views ever", "uploaded 200 days ago"]);
+  assert.deepEqual(r.videos[1].reasons.slice(1, 2), ["never watched"]);
+  assert.equal(r.videos[2].reasons[0], "1 view in the last 90 days");
+  assert.equal(r.totalSize, 5e9 + 1e8 + 9e9);
+  assert.equal(r.skippedPosted, 1);
+  const withPosts = proposeCleanup(p as never, { maxViews: 0, minAgeDays: 60, limit: 1 }, { posted, now, includePosted: true });
+  assert.deepEqual(withPosts.videos.map((x) => [x.id, x.post]), [["in-a-post", "Oct 03 posts"]]); // biggest first
+  assert.equal(withPosts.matching, 3);
+});
+
+test("delete: logged only once Bunny deletes; already-gone counts as deleted; one failure doesn't stop the rest", async () => {
+  const [a, b, c] = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((x) => `${x}-0000-4000-8000-000000000000`);
+  const deletes: string[] = [];
+  const lib = {
+    async api(method: string, path: string) {
+      const id = path.split("/")[2];
+      if (method === "GET") {
+        if (id === c) throw new Error("HTTP 404: gone");
+        return { title: `t-${id.slice(0, 1)}`, storageSize: 100, views: 2, collectionId: "" };
+      }
+      if (id === b) throw new Error("HTTP 500: boom");
+      deletes.push(id);
+      return null;
+    },
+    async fetch() { return new Response(); },
+    async findOrCreateCollection() { return ""; },
+  };
+  const log = join(tmp, "deleted", "deleted.jsonl");
+  const r = await deleteVideos(lib, [a, b, c], log, { [a]: "no views in the last 90 days" });
+  assert.deepEqual(r.deleted, [a, c]);
+  assert.deepEqual(r.failed.map((f) => f.id), [b]);
+  assert.deepEqual(deletes, [a]);
+  const h = readDeleted(log);
+  assert.equal(h.count, 1); // b failed, c was already gone: neither is logged as deleted by us
+  assert.deepEqual([h.recent[0].id, h.recent[0].reason, h.bytes], [a, "no views in the last 90 days", 100]);
+  await assert.rejects(deleteVideos(lib, ["../collections/x"], log), /not a video id/);
 });

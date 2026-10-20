@@ -4,8 +4,8 @@
 // Resolutions). Downloads come from the library's CDN host, so a library with token authentication, "Block direct
 // URL file access" or an Allowed domains list refuses them (403).
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -218,7 +218,7 @@ export async function popularity(b: LibraryHost, days: number, onProgress: (done
     };
     const series = byDay(r.viewsChart), watch = byDay(r.watchTimeChart);
     onProgress(++done, videos.length);
-    return { id: v.id, title: v.title, collectionId: v.collectionId, total: v.views, dateUploaded: v.dateUploaded, length: v.length,
+    return { id: v.id, title: v.title, collectionId: v.collectionId, total: v.views, dateUploaded: v.dateUploaded, length: v.length, size: v.storageSize,
       views: sum(series.slice(days)), prev: sum(series.slice(0, days)), daily: series.slice(days), watch: sum(watch.slice(days)) };
   });
   rows.sort((a, z) => z.views - a.views || z.total - a.total);
@@ -230,6 +230,74 @@ export async function popularity(b: LibraryHost, days: number, onProgress: (done
   }
   return {
     days, from: dates[days], to: dates.at(-1)!, at: new Date().toISOString(), checked: rows.length,
-    videos: rows.slice(0, 100), collections: [...collections.values()].sort((a, z) => z.views - a.views),
+    videos: rows, collections: [...collections.values()].sort((a, z) => z.views - a.views),
   };
+}
+
+export type Popularity = Awaited<ReturnType<typeof popularity>>;
+export type CleanupRules = { maxViews: number; minAgeDays: number; limit: number };
+
+/**
+ * Which videos to delete next: at most `maxViews` views in the popularity period, uploaded at least `minAgeDays` ago
+ * (new videos haven't had time), least-viewed first and, among equals, biggest first, so each batch frees the most
+ * space. Videos used in a vidpub Patreon post (`posted`: id -> job folder) are left out unless `includePosted`:
+ * deleting them breaks those posts. Every pick says why.
+ */
+export function proposeCleanup(p: Popularity, rules: CleanupRules, opts: { posted?: Map<string, string>; includePosted?: boolean; now?: Date } = {}) {
+  const now = (opts.now ?? new Date()).getTime();
+  const posted = opts.posted ?? new Map();
+  const ageOf = (d: string) => Math.max(0, Math.floor((now - Date.parse(d)) / 86_400_000));
+  const fits = p.videos.filter((v) => v.views <= rules.maxViews && ageOf(v.dateUploaded) >= rules.minAgeDays);
+  const allowed = fits.filter((v) => opts.includePosted || !posted.has(v.id));
+  const picks = [...allowed].sort((a, z) => a.views - z.views || z.size - a.size).slice(0, Math.max(0, rules.limit));
+  const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+  const videos = picks.map((v) => {
+    const age = ageOf(v.dateUploaded);
+    const reasons = [
+      v.views ? `${plural(v.views, "view")} in the last ${p.days} days` : `no views in the last ${p.days} days`,
+      v.total ? `${plural(v.total, "view")} ever` : "never watched",
+      `uploaded ${plural(age, "day")} ago`,
+    ];
+    return { id: v.id, title: v.title, collectionId: v.collectionId, size: v.size, views: v.views, total: v.total,
+      dateUploaded: v.dateUploaded, age, post: posted.get(v.id) ?? null, reasons };
+  });
+  return {
+    days: p.days, from: p.from, to: p.to, at: p.at, rules, checked: p.videos.length,
+    matching: allowed.length, skippedPosted: fits.length - allowed.length,
+    videos, totalSize: videos.reduce((a, v) => a + (v.size || 0), 0),
+  };
+}
+
+export type DeletedEntry = { at: string; id: string; title: string; collectionId: string; size: number; views: number; reason: string };
+
+/** Delete videos from Bunny for good, logging each one (JSON lines) once it's gone. A video that's already gone
+ *  (404) counts as deleted. One failure doesn't stop the rest. */
+export async function deleteVideos(b: LibraryHost, ids: unknown[], log: string, reasons: Record<string, string> = {}) {
+  const deleted: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+  const list = ids.map((x) => guid(x)); // all checked before anything is deleted
+  mkdirSync(dirname(log), { recursive: true });
+  for (const id of list) {
+    try {
+      const v = await b.api("GET", `/videos/${id}`).catch((e) => (/HTTP 404/.test(String(e?.message)) ? null : Promise.reject(e)));
+      if (v) {
+        const entry: DeletedEntry = { at: new Date().toISOString(), id, title: v.title, collectionId: v.collectionId ?? "",
+          size: v.storageSize ?? 0, views: v.views ?? 0, reason: reasons[id] ?? "" };
+        await b.api("DELETE", `/videos/${id}`);
+        appendFileSync(log, `${JSON.stringify(entry)}\n`); // after Bunny confirms: the log only lists real deletions
+      }
+      deleted.push(id);
+    } catch (e) {
+      failed.push({ id, error: (e as Error).message });
+    }
+  }
+  return { deleted, failed };
+}
+
+/** The deletion log, newest first, with totals. */
+export function readDeleted(log: string) {
+  const entries: DeletedEntry[] = existsSync(log)
+    ? readFileSync(log, "utf8").split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } })
+    : [];
+  return { count: entries.length, bytes: entries.reduce((a, e) => a + (e.size || 0), 0), recent: entries.reverse().slice(0, 50) };
 }

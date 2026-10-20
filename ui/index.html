@@ -148,6 +148,10 @@
   svg.bars .base { stroke: var(--line); stroke-width: 1; }
   svg.bars.spark { width: 120px; height: 24px; }
   .delta { font-weight: 600; font-size: 13px; }
+  .cu-rules { line-height: 2.4; }
+  .cu-rules input[type="number"] { width: 72px; font: inherit; padding: 4px 8px; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 6px; }
+  .cu-rules select { width: auto; padding: 4px 8px; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
   .delta.ok { color: var(--ok); } .delta.bad { color: var(--bad); }
   #pop-days { width: auto; }
   .axis { justify-content: space-between; font-size: 12px; margin-top: 4px; }
@@ -303,6 +307,32 @@
       </div>
     </section>
     <section class="card">
+      <h2>Clean up</h2>
+      <div class="cu-rules">
+        Videos with at most <input type="number" id="cu-max" value="0" min="0" aria-label="Most views"> views in the last
+        <select id="cu-days" aria-label="Period"><option value="30">30 days</option><option value="90" selected>90 days</option></select>,
+        uploaded more than <input type="number" id="cu-age" value="60" min="0" aria-label="Minimum age in days"> days ago,
+        up to <input type="number" id="cu-limit" value="20" min="1" max="200" aria-label="Batch size"> at a time.
+      </div>
+      <div class="row" style="margin-top: 10px">
+        <button type="button" id="cu-propose">Propose a batch</button>
+        <label class="check" style="margin: 0"><input type="checkbox" id="cu-posted"> Include videos used in Patreon posts</label>
+      </div>
+      <p class="hint" id="cu-status" role="status" style="margin: 10px 0 0"></p>
+      <div id="cu-body" hidden>
+        <table class="lib-table">
+          <thead><tr><th></th><th>Video</th><th>Collection</th><th class="numc">Size</th><th>Why</th></tr></thead>
+          <tbody id="cu-rows"></tbody>
+        </table>
+        <div class="row" style="margin-top: 12px">
+          <button type="button" class="danger" id="cu-delete"></button>
+          <span class="hint" id="cu-result" role="status"></span>
+        </div>
+      </div>
+      <details id="cu-history" hidden style="margin-top: 14px"><summary id="cu-history-sum"></summary>
+        <table class="lib-table"><tbody id="cu-history-list"></tbody></table></details>
+    </section>
+    <section class="card">
       <h2>Videos</h2>
       <div class="row lib-tools">
         <input type="search" id="lib-search" placeholder="Search titles" aria-label="Search titles" autocomplete="off">
@@ -410,7 +440,7 @@ function show(tab) {
   for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   for (const t of ["new", "jobs", "library", "settings"]) $(`tab-${t}`).hidden = t !== tab;
   if (tab === "jobs") loadJobs().catch((e) => alert(e.message));
-  if (tab === "library" && !lib.loaded) loadLibrary().then(() => loadPopular());
+  if (tab === "library" && !lib.loaded) loadLibrary().then(() => (loadPopular(), loadDeleted()));
 }
 for (const b of document.querySelectorAll("nav button")) b.onclick = () => show(b.dataset.tab);
 
@@ -1301,6 +1331,84 @@ function renderPopular(p) {
 }
 $("pop-days").onchange = () => loadPopular();
 $("pop-refresh").onclick = () => loadPopular(true);
+
+// ---- clean up: propose a batch of unpopular videos to delete, with reasons; delete after a typed confirmation
+const gb = (b) => `${((b || 0) / 1e9).toFixed(1)} GB`;
+const cu = { proposal: null, selected: new Set() };
+let cuTimer;
+async function proposeCleanup() {
+  clearTimeout(cuTimer);
+  const q = new URLSearchParams({ days: $("cu-days").value, maxViews: $("cu-max").value, minAge: $("cu-age").value, limit: $("cu-limit").value, includePosted: $("cu-posted").checked ? "1" : "0" });
+  try {
+    const r = await api(`/api/library/cleanup?${q}`);
+    if (r.error) return ($("cu-status").textContent = r.error);
+    if (!r.proposal) { // ranking every video first
+      $("cu-status").textContent = r.total ? `Checking views: ${num(r.done)} of ${num(r.total)} videos…` : "Listing videos…";
+      cuTimer = setTimeout(proposeCleanup, 1000);
+      return;
+    }
+    cu.proposal = r.proposal;
+    cu.selected = new Set(r.proposal.videos.map((v) => v.id));
+    renderCleanup();
+  } catch (e) {
+    $("cu-status").textContent = e.message;
+  }
+}
+function renderCleanup() {
+  const p = cu.proposal;
+  $("cu-status").textContent = `${num(p.matching)} of ${num(p.checked)} videos match` +
+    (p.skippedPosted ? ` · ${num(p.skippedPosted)} more are used in Patreon posts and left out` : "") +
+    ` · views counted ${p.from} to ${p.to}`;
+  $("cu-rows").replaceChildren(...p.videos.map((v) => {
+    const cb = el("input", { type: "checkbox", checked: cu.selected.has(v.id), onchange: () => { cb.checked ? cu.selected.add(v.id) : cu.selected.delete(v.id); renderDeleteButton(); } });
+    cb.setAttribute("aria-label", `Delete ${v.title}`);
+    return el("tr", {},
+      el("td", {}, cb),
+      el("td", { className: "ltitle" }, el("button", { type: "button", textContent: v.title, onclick: () => openVideo(v.id) }),
+        v.post ? el("div", { className: "warn", style: "font-size: 13px", textContent: `⚠ used in a Patreon post (${v.post}): it will stop playing there` }) : null),
+      el("td", { textContent: collName(v.collectionId) }),
+      el("td", { className: "numc", textContent: gb(v.size) }),
+      el("td", { className: "hint", textContent: v.reasons.join(" · ") }));
+  }));
+  $("cu-body").hidden = !p.videos.length;
+  if (!p.videos.length) $("cu-status").textContent += ". Nothing to delete with these rules.";
+  renderDeleteButton();
+}
+function renderDeleteButton() {
+  const picked = cu.proposal.videos.filter((v) => cu.selected.has(v.id));
+  $("cu-delete").textContent = `Delete ${picked.length} video${picked.length === 1 ? "" : "s"} (${gb(picked.reduce((a, v) => a + (v.size || 0), 0))})`;
+  $("cu-delete").disabled = !picked.length;
+}
+$("cu-propose").onclick = () => { $("cu-result").textContent = ""; proposeCleanup(); };
+$("cu-delete").onclick = async () => {
+  const picked = cu.proposal.videos.filter((v) => cu.selected.has(v.id));
+  const posts = picked.filter((v) => v.post).length;
+  const typed = prompt(`This permanently deletes ${picked.length} video${picked.length === 1 ? "" : "s"} (${gb(picked.reduce((a, v) => a + (v.size || 0), 0))}) from Bunny. It can't be undone.` +
+    (posts ? `\n${posts} of them ${posts === 1 ? "is" : "are"} used in Patreon posts, which will stop playing.` : "") + `\n\nType ${picked.length} to delete.`);
+  if (typed === null) return;
+  $("cu-delete").disabled = true;
+  try {
+    const r = await api("/api/library/delete", { ids: picked.map((v) => v.id), confirm: typed.trim(), reasons: Object.fromEntries(picked.map((v) => [v.id, v.reasons.join(" · ")])) });
+    $("cu-result").textContent = `Deleted ${r.deleted.length}.` + (r.failed.length ? ` ${r.failed.length} failed: ${r.failed.map((f) => f.error).join("; ")}` : "");
+    await loadDeleted();
+    lib.loaded = false;
+    loadLibrary(); // counts, rankings and the list changed
+    proposeCleanup();
+  } catch (e) {
+    $("cu-result").textContent = e.message;
+    $("cu-delete").disabled = false;
+  }
+};
+async function loadDeleted() {
+  try {
+    const h = await api("/api/library/deleted");
+    $("cu-history").hidden = !h.count;
+    $("cu-history-sum").textContent = `Deleted so far: ${num(h.count)} video${h.count === 1 ? "" : "s"}, ${gb(h.bytes)} freed`;
+    $("cu-history-list").replaceChildren(...h.recent.map((e) => el("tr", {},
+      el("td", { className: "hint", textContent: e.at.slice(0, 10) }), el("td", { textContent: e.title }),
+      el("td", { className: "numc", textContent: gb(e.size) }), el("td", { className: "hint", textContent: e.reason }))));
+  } catch {}
+}
 
 // ---- jobs
 async function loadJobs() {

@@ -166,8 +166,16 @@ The **Library** tab works on everything in your Bunny Stream library, not just w
   (`brew install ffmpeg`), without re-encoding. A library with token authentication, "Block direct URL file
   access" or an Allowed domains list refuses downloads.
 
-Bunny counts plays, not people: there's no per-viewer or per-patron data. Deleting a collection on Bunny deletes
-the videos in it, so vidpub only moves videos, never deletes.
+- **Clean up:** proposes a batch of videos to delete to save storage: at most N views in the last 30 or 90 days,
+  uploaded more than D days ago (new videos haven't had time), up to a batch size; least-viewed first and, among
+  equals, biggest first, so each batch frees the most space. Every video shows why it's proposed ("no views in the
+  last 90 days · 3 views ever · uploaded 142 days ago") and its size; untick any to keep. **Delete** asks you to type
+  the number of videos, then deletes them from Bunny for good and logs each one (title, size, collection, views,
+  reason, date) to `~/.vidpub/deleted.jsonl`; "Deleted so far" shows the total. Videos used in a vidpub Patreon post
+  (any picked folder's job that was sent) are left out unless you tick "Include videos used in Patreon posts":
+  deleting them breaks those posts. vidpub never deletes collections (Bunny deletes a collection's videos with it).
+
+Bunny counts plays, not people: there's no per-viewer or per-patron data.
 
 ## Patreon
 
