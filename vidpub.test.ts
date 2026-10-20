@@ -298,6 +298,7 @@ test("popularity: views this period vs the one before, ranked; collections summe
   const day = (ago: number) => new Date(Date.now() - ago * 86_400_000).toISOString().slice(0, 10);
   const [a, b, c] = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((p) => `${p}-0000-4000-8000-000000000000`);
   const videos = [{ guid: a, title: "A", collectionId: "c1", views: 50 }, { guid: b, title: "B", collectionId: "c1", views: 9 }, { guid: c, title: "C", collectionId: "", views: 1 }];
+  const watch = { [`${day(0)}T00:00:00Z`]: 300, [`${day(9)}T00:00:00Z`]: 99 }; // seconds; only today's counts this period
   const charts: Record<string, Record<string, number>> = { // last 7 days = this period, the 7 before = previous
     [a]: { [`${day(10)}T00:00:00Z`]: 8, [`${day(1)}T00:00:00Z`]: 2 },
     [b]: { [`${day(0)}T00:00:00Z`]: 5, [`${day(3)}T00:00:00Z`]: 1 },
@@ -306,7 +307,8 @@ test("popularity: views this period vs the one before, ranked; collections summe
   const lib = {
     async api(_m: string, path: string) {
       if (path.startsWith("/videos?")) return { totalItems: 3, items: videos };
-      return { viewsChart: charts[new URLSearchParams(path.split("?")[1]).get("videoGuid")!] };
+      const g = new URLSearchParams(path.split("?")[1]).get("videoGuid")!;
+      return { viewsChart: charts[g], watchTimeChart: g === b ? watch : {} };
     },
     async fetch() { return new Response(); },
     async findOrCreateCollection() { return ""; },
@@ -316,6 +318,7 @@ test("popularity: views this period vs the one before, ranked; collections summe
   assert.deepEqual(p.videos.map((v) => [v.title, v.views, v.prev]), [["B", 6, 0], ["A", 2, 8], ["C", 0, 0]]);
   assert.equal(p.videos[0].daily.length, 7);
   assert.equal(p.videos[0].daily.at(-1), 5); // today is the last day
-  assert.deepEqual(p.collections.map((x) => [x.collectionId, x.videos, x.views, x.prev]), [["c1", 2, 8, 8], ["", 1, 0, 0]]);
+  assert.equal(p.videos[0].watch, 300);
+  assert.deepEqual(p.collections.map((x) => [x.collectionId, x.videos, x.views, x.prev, x.watch]), [["c1", 2, 8, 8, 300], ["", 1, 0, 0, 0]]);
   assert.deepEqual(seen.sort(), [1, 2, 3]);
 });

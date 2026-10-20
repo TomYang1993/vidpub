@@ -15,8 +15,10 @@ export type LibraryHost = {
   fetch(url: string, init: RequestInit): Promise<Response>;
   findOrCreateCollection(name: string): Promise<string>;
 };
+// Bunny's per-video totalWatchTime / averageWatchTime fields stay 0 (checked Oct 2026 on a 416-video library with
+// 200k+ seconds watched); watch time is only in the Statistics endpoint, in seconds. So it isn't on LibVideo.
 export type LibVideo = {
-  id: string; title: string; collectionId: string; views: number; averageWatchTime: number; totalWatchTime: number;
+  id: string; title: string; collectionId: string; views: number;
   length: number; storageSize: number; dateUploaded: string; status: number; thumbnailUrl?: string;
 };
 
@@ -28,9 +30,8 @@ const guid = (s: unknown, what = "video id") => {
 };
 
 const pick = (v: any): LibVideo => ({
-  id: v.guid, title: v.title, collectionId: v.collectionId ?? "", views: v.views ?? 0, averageWatchTime: v.averageWatchTime ?? 0,
-  totalWatchTime: v.totalWatchTime ?? 0, length: v.length ?? 0, storageSize: v.storageSize ?? 0, dateUploaded: v.dateUploaded,
-  status: v.status, thumbnailUrl: v.thumbnailUrl,
+  id: v.guid, title: v.title, collectionId: v.collectionId ?? "", views: v.views ?? 0,
+  length: v.length ?? 0, storageSize: v.storageSize ?? 0, dateUploaded: v.dateUploaded, status: v.status, thumbnailUrl: v.thumbnailUrl,
 });
 
 /** Every collection, all pages. */
@@ -53,10 +54,12 @@ export async function searchVideos(b: LibraryHost, q: { search?: string; collect
 }
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
-/** Views and watch time per day and per country over the last `days`, for the library or one video. */
-export async function stats(b: LibraryHost, days = 30, videoId?: string) {
+const sum = (xs: number[]) => xs.reduce((a, x) => a + x, 0);
+/** Views and watch time (seconds) per day and per country over the last `days` (or since `since`), for the library or
+ *  one video. */
+export async function stats(b: LibraryHost, days = 30, videoId?: string, since?: string) {
   const to = new Date();
-  const from = new Date(to.getTime() - (days - 1) * 86_400_000);
+  const from = since ? new Date(since) : new Date(to.getTime() - (days - 1) * 86_400_000);
   const params = new URLSearchParams({ dateFrom: day(from), dateTo: day(to), hourly: "false" });
   if (videoId) params.set("videoGuid", guid(videoId));
   const r = await b.api("GET", `/statistics?${params}`);
@@ -65,19 +68,21 @@ export async function stats(b: LibraryHost, days = 30, videoId?: string) {
   return { views: series(r.viewsChart), watchTime: series(r.watchTimeChart), countries: top(r.countryViewCounts), engagement: r.engagementScore as number };
 }
 
-/** A video with its collection, last-30-day stats, watch heatmap and what can be downloaded. */
+/** A video with its collection, last-30-day stats, all-time watch time, watch heatmap and what can be downloaded. */
 export async function videoDetails(b: LibraryHost, id: string) {
   guid(id);
-  const [video, last30, heat, res] = await Promise.all([
-    b.api("GET", `/videos/${id}`),
+  const video = await b.api("GET", `/videos/${id}`);
+  const [allTime, last30, heat, res] = await Promise.all([
+    stats(b, 0, id, video.dateUploaded ?? "2020-01-01"),
     stats(b, 30, id),
     b.api("GET", `/videos/${id}/heatmap`).catch(() => ({ heatmap: {} })), // no plays yet: nothing to show
     b.api("GET", `/videos/${id}/resolutions`).catch(() => ({ data: {} })),
   ]);
   const heatmap = Object.entries(heat?.heatmap ?? {}).sort((a, z) => Number(a[0]) - Number(z[0])).map(([, n]) => Number(n));
   const names = (list: { resolution: string }[] = []) => list.map((r) => r.resolution);
+  const watched = sum(allTime.watchTime.map(([, s]) => s)), plays = sum(allTime.views.map(([, n]) => n));
   return {
-    video: pick(video), stats: last30, heatmap,
+    video: pick(video), stats: last30, heatmap, watch: { total: watched, perView: plays ? watched / plays : 0 },
     mp4: names(res.data?.mp4Resolutions), hls: names(res.data?.playlistResolutions), hasOriginal: !!res.data?.hasOriginal,
   };
 }
@@ -206,19 +211,21 @@ export async function popularity(b: LibraryHost, days: number, onProgress: (done
   let done = 0;
   const rows = await pool(videos, concurrency, async (v) => {
     const params = new URLSearchParams({ videoGuid: v.id, dateFrom: dates[0], dateTo: dates.at(-1)!, hourly: "false" });
-    const chart: Record<string, number> = (await b.api("GET", `/statistics?${params}`)).viewsChart ?? {};
-    const byDay = new Map(Object.entries(chart).map(([k, n]) => [k.slice(0, 10), Number(n) || 0]));
-    const series = dates.map((d) => byDay.get(d) ?? 0);
+    const r = await b.api("GET", `/statistics?${params}`);
+    const byDay = (chart: Record<string, number> = {}) => {
+      const m = new Map(Object.entries(chart).map(([k, n]) => [k.slice(0, 10), Number(n) || 0]));
+      return dates.map((d) => m.get(d) ?? 0);
+    };
+    const series = byDay(r.viewsChart), watch = byDay(r.watchTimeChart);
     onProgress(++done, videos.length);
-    const sum = (xs: number[]) => xs.reduce((a, x) => a + x, 0);
-    return { id: v.id, title: v.title, collectionId: v.collectionId, total: v.views, dateUploaded: v.dateUploaded,
-      views: sum(series.slice(days)), prev: sum(series.slice(0, days)), daily: series.slice(days) };
+    return { id: v.id, title: v.title, collectionId: v.collectionId, total: v.views, dateUploaded: v.dateUploaded, length: v.length,
+      views: sum(series.slice(days)), prev: sum(series.slice(0, days)), daily: series.slice(days), watch: sum(watch.slice(days)) };
   });
   rows.sort((a, z) => z.views - a.views || z.total - a.total);
-  const collections = new Map<string, { collectionId: string; videos: number; views: number; prev: number }>();
+  const collections = new Map<string, { collectionId: string; videos: number; views: number; prev: number; watch: number }>();
   for (const r of rows) {
-    const c = collections.get(r.collectionId) ?? { collectionId: r.collectionId, videos: 0, views: 0, prev: 0 };
-    Object.assign(c, { videos: c.videos + 1, views: c.views + r.views, prev: c.prev + r.prev });
+    const c = collections.get(r.collectionId) ?? { collectionId: r.collectionId, videos: 0, views: 0, prev: 0, watch: 0 };
+    Object.assign(c, { videos: c.videos + 1, views: c.views + r.views, prev: c.prev + r.prev, watch: c.watch + r.watch });
     collections.set(r.collectionId, c);
   }
   return {

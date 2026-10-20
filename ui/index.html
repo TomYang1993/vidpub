@@ -292,12 +292,12 @@
       <p class="hint" id="pop-status" role="status" style="margin: 8px 0 0"></p>
       <div id="pop-body" hidden>
         <table class="lib-table">
-          <thead><tr><th class="numc">#</th><th>Video</th><th>Collection</th><th class="numc">Views</th><th class="numc">vs before</th><th>Per day</th><th class="numc">All time</th></tr></thead>
+          <thead><tr><th class="numc">#</th><th>Video</th><th>Collection</th><th class="numc">Views</th><th class="numc">vs before</th><th>Per day</th><th class="numc">Avg watch</th><th class="numc">All time</th></tr></thead>
           <tbody id="pop-videos"></tbody>
         </table>
         <h3 class="sub">By collection</h3>
         <table class="lib-table">
-          <thead><tr><th>Collection</th><th class="numc">Videos</th><th class="numc">Views</th><th class="numc">vs before</th></tr></thead>
+          <thead><tr><th>Collection</th><th class="numc">Videos</th><th class="numc">Views</th><th class="numc">vs before</th><th class="numc">Watched</th></tr></thead>
           <tbody id="pop-colls"></tbody>
         </table>
       </div>
@@ -317,7 +317,7 @@
       </div>
       <table class="lib-table">
         <thead><tr><th><input type="checkbox" id="lib-all" aria-label="Select all on this page"></th><th>Title</th><th>Collection</th>
-          <th class="numc">Views</th><th class="numc">Watched</th><th class="numc">Length</th><th>Uploaded</th></tr></thead>
+          <th class="numc">Views</th><th class="numc">Length</th><th>Uploaded</th></tr></thead>
         <tbody id="lib-rows"></tbody>
       </table>
       <p class="hint" id="lib-empty" hidden>No videos match.</p>
@@ -1155,7 +1155,6 @@ function renderLibrary() {
       el("td", { className: "ltitle" }, el("button", { type: "button", className: "linkish", textContent: v.title, onclick: () => openVideo(v.id) })),
       el("td", { textContent: collName(v.collectionId) }),
       el("td", { className: "numc", textContent: num(v.views) }),
-      el("td", { className: "numc", textContent: hours(v.totalWatchTime) }),
       el("td", { className: "numc", textContent: dur(v.length) }),
       el("td", { textContent: (v.dateUploaded ?? "").slice(0, 10) }));
   }));
@@ -1231,7 +1230,7 @@ async function openVideo(id) {
     $("v-head").textContent = v.title;
     $("v-body").replaceChildren(...[
       el("p", { className: "hint", style: "margin: 2px 0 14px", textContent: `${collName(v.collectionId)} · uploaded ${(v.dateUploaded ?? "").slice(0, 10)} · ${(v.storageSize / 1e9).toFixed(2)} GB` }),
-      el("div", { className: "tiles" }, tile("Views", num(v.views)), tile("Avg watch", dur(v.averageWatchTime)), tile("Total watch", hours(v.totalWatchTime)), tile("Length", dur(v.length))),
+      el("div", { className: "tiles" }, tile("Views", num(v.views)), tile("Avg watch per view", dur(d.watch.perView)), tile("Total watched", hours(d.watch.total)), tile("Length", dur(v.length))),
       el("h3", { className: "sub", textContent: "Views per day, last 30 days" }),
       bars(views, { label: "Views per day", tip: (n, i) => `${d.stats.views[i][0]}: ${num(n)} views` }),
       el("div", { className: "row hint axis" }, el("span", { textContent: d.stats.views[0]?.[0] ?? "" }), el("span", { textContent: d.stats.views.at(-1)?.[0] ?? "" })),
@@ -1290,12 +1289,14 @@ function renderPopular(p) {
     el("td", { className: "numc", textContent: num(v.views) }),
     changeCell(v.views, v.prev),
     el("td", {}, bars(v.daily, { small: true, label: `${v.title}: views per day`, tip: (n, d) => `day ${d + 1}: ${num(n)} views` })),
+    el("td", { className: "numc", title: v.length ? `${Math.round(((v.watch / Math.max(v.views, 1)) / v.length) * 100)}% of ${dur(v.length)}` : "", textContent: v.views ? dur(v.watch / v.views) : "—" }),
     el("td", { className: "numc hint", textContent: num(v.total) }))));
   $("pop-colls").replaceChildren(...p.collections.slice(0, 15).map((c) => el("tr", {},
     el("td", { textContent: c.collectionId ? collName(c.collectionId) : "(no collection)" }),
     el("td", { className: "numc hint", textContent: num(c.videos) }),
     el("td", { className: "numc", textContent: num(c.views) }),
-    changeCell(c.views, c.prev))));
+    changeCell(c.views, c.prev),
+    el("td", { className: "numc", textContent: hours(c.watch) }))));
   $("pop-body").hidden = false;
 }
 $("pop-days").onchange = () => loadPopular();
