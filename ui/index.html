@@ -102,6 +102,9 @@
   .ppage .pw span { border: 1px solid #c9c9c9; border-radius: 999px; padding: 6px 14px; }
   .ppage textarea, .ppage input { background: #fff; color: #000; border: 1px dashed #c9c9c9; font: inherit; }
   .ppage .empty { color: #8a8a85; font-size: 14px; }
+  .ppage .patt { border-top: 1px solid #e5e5e5; padding-top: 14px; margin-top: 8px; display: grid; gap: 8px; }
+  .ppage .pfile { border: 1px solid #e5e5e5; border-radius: 8px; padding: 10px 12px; font-size: 14px; overflow-wrap: anywhere; }
+  .ppage .pfile::before { content: "📎 "; }
   .ppage button { background: #fff; color: #000; border-color: #c9c9c9; }
   .pmeta { margin: 4px 0 0; }
   .pnote { margin: 12px 0 0; }
@@ -110,7 +113,7 @@
   .tpl-row .check { flex: 1; }
   .tpl-row button, .linkish { padding: 1px 8px; font-size: 13px; }
   ul.blocks { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; min-height: 14px; }
-  ul.blocks > li { display: grid; grid-template-columns: 18px 60px 1fr auto; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  ul.blocks > li { display: grid; grid-template-columns: 18px 88px 1fr auto; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
   ul.blocks > li.section { display: block; border: 1px dashed var(--accent); background: var(--field); padding: 8px 10px 10px; }
   ul.blocks > li.dragging { opacity: 0.35; }
   ul.blocks textarea { min-height: 38px; }
@@ -453,7 +456,9 @@ const lists = { videos: [], images: [] }; // [{ name, size, on }] in post order
 const needs = () => templates.find((t) => t.id === template)?.needs ?? "videos";
 const items = () => lists[needs()];
 
-const KIND = { text: "Text", image: "Image", link: "Link", button: "Button", divider: "Divider", paywall: "Paywall" };
+const KIND = { text: "Text", image: "Image", link: "Link", button: "Button", divider: "Divider", paywall: "Paywall", attachments: "Attachments" };
+/** Whether a template shows anything from Bunny (as templates.ts usesBunny): if not, videos aren't uploaded there. */
+const usesBunny = (t) => !!t && /\{(preview|play)\}/.test(JSON.stringify(t.blocks));
 const kindOf = (b) => Object.keys(b)[0];
 const kinds = (bs) => bs.map((b) => KIND[kindOf(b)]).join(" + ");
 const summary = (t) => t.blocks.map((b) => ("repeat" in b ? `each ${t.needs === "videos" ? "video" : "image"}: ${kinds(b.repeat)}` : KIND[kindOf(b)])).join(" · ");
@@ -469,6 +474,8 @@ function pageBlock(b) {
   if (k === "paywall") return el("div", { className: "pw" }, el("span", { textContent: "Paid access starts here ↓" }));
   if (k === "button") return el("div", { className: "pbtn" }, b.button.caption ? el("span", { textContent: b.button.caption }) : null, el("b", { textContent: b.button.text }));
   if (k === "ph") return el("div", { className: "ph", textContent: b.ph });
+  if (k === "files") return el("div", { className: "patt" }, el("b", { textContent: "Attachments" }),
+    ...b.files.map((f) => el("div", { className: "pfile", textContent: f })));
   const img = el("img", { alt: "", loading: "lazy", src: /^https:\/\//.test(b.image) ? b.image : `/file?t=${encodeURIComponent(token)}&p=${encodeURIComponent(b.image)}` });
   img.onerror = () => img.replaceWith(el("div", { className: "ph", textContent: `Image didn't load here: ${b.image}` }));
   return img;
@@ -678,9 +685,9 @@ $("thumb-file").onchange = async () => {
 // ---- post
 function syncPost() {
   const videos = needs() === "videos";
-  $("collection-box").hidden = !videos;
-  $("tiers").hidden = $("access").value !== "tiers";
   const t = templates.find((x) => x.id === template);
+  $("collection-box").hidden = !videos || (!!t && !usesBunny(t)); // nothing goes to Bunny for this template
+  $("tiers").hidden = $("access").value !== "tiers";
   $("text-box").hidden = !!t && !uses(t, "text");
 }
 for (const id of ["publish-draft", "publish-now"]) $(id).onchange = updateStart;
@@ -710,7 +717,8 @@ function updateStart() {
   const any = items().some((v) => v.on);
   const now = $("publish-now").checked;
   $("start").disabled = !folder || busy || !any;
-  $("start").textContent = `${needs() === "videos" ? "Upload and " : ""}${now ? "publish on Patreon" : "save as a Patreon draft"}`.replace(/^./, (c) => c.toUpperCase());
+  const bunny = needs() === "videos" && usesBunny(templates.find((x) => x.id === template));
+  $("start").textContent = `${bunny ? "Upload and " : ""}${now ? "publish on Patreon" : "save as a Patreon draft"}`.replace(/^./, (c) => c.toUpperCase());
   $("start-hint").textContent = busy ? "Already queued: see Jobs." : !folder ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.` : "";
 }
 
@@ -904,16 +912,20 @@ function newBlock(kind, inRepeat) {
     button: { button: inRepeat && vid ? { text: "▶ Play", url: "{play}", caption: "{name}" } : { text: "Open", url: "https://" } },
     divider: { divider: true },
     paywall: { paywall: true },
+    attachments: { attachments: true },
   }[kind];
   return { k: ++tplKey, b };
 }
 
 function renderLayout() {
+  // attachments stay last: Patreon always shows them in their own section below the post
+  tpl.items.sort((a, z) => (!isSection(a) && "attachments" in a.b ? 1 : 0) - (!isSection(z) && "attachments" in z.b ? 1 : 0));
   const hasWall = tpl.items.some((x) => !isSection(x) && "paywall" in x.b);
+  const hasFiles = tpl.items.some((x) => !isSection(x) && "attachments" in x.b);
   $("t-root").replaceChildren(...tpl.items.map((x) => (isSection(x) ? sectionLi(x) : blockLi(x, tpl.items))));
-  const add = (kind) => el("button", { type: "button", textContent: `+ ${KIND[kind]}`, disabled: kind === "paywall" && hasWall,
+  const add = (kind) => el("button", { type: "button", textContent: `+ ${KIND[kind]}`, disabled: (kind === "paywall" && hasWall) || (kind === "attachments" && hasFiles),
     onclick: () => { tpl.items.push(newBlock(kind, false)); renderLayout(); } });
-  $("t-adds").replaceChildren(...["text", "image", "link", "button", "divider", "paywall"].map(add),
+  $("t-adds").replaceChildren(...["text", "image", "link", "button", "divider", "paywall", "attachments"].map(add),
     el("button", { type: "button", textContent: "+ Repeat section", onclick: () => { tpl.items.push({ k: ++tplKey, repeat: [newBlock("image", true), newBlock("link", true)] }); renderLayout(); } }));
   $("chips").replaceChildren("Insert: ", ...[...VARS.all, ...VARS[tpl.needs]].map((v) =>
     el("button", { type: "button", textContent: `{${v}}`, onmousedown: (e) => e.preventDefault(), onclick: () => insertVar(v) })),
@@ -950,7 +962,8 @@ function blockLi(x, list) {
     f.setAttribute("aria-label", label);
     return f;
   };
-  const field = kind === "paywall" ? el("span", { className: "wall", textContent: "Paid access starts here" })
+  const field = kind === "attachments" ? el("span", { className: "hint", textContent: `The ${tpl.needs} themselves, attached. Patreon shows them below the post.` })
+    : kind === "paywall" ? el("span", { className: "wall", textContent: "Paid access starts here" })
     : kind === "divider" ? el("div", { className: "ruler" })
     : kind === "button" ? el("div", { className: "btnf" },
       input(x.b.button.text, "Button text", (v) => (x.b.button.text = v)), input(x.b.button.url, "Button link", (v) => (x.b.button.url = v)),
@@ -964,8 +977,8 @@ function blockLi(x, list) {
     el("span", { className: "kind", textContent: KIND[kind] }),
     field,
     el("span", { className: "move" },
-      mini("↑", `Move ${KIND[kind]} up`, () => moveBlock(x, list, -1), !inSection && i === 0),
-      mini("↓", `Move ${KIND[kind]} down`, () => moveBlock(x, list, 1), !inSection && i === list.length - 1),
+      mini("↑", `Move ${KIND[kind]} up`, () => moveBlock(x, list, -1), kind === "attachments" || (!inSection && i === 0)),
+      mini("↓", `Move ${KIND[kind]} down`, () => moveBlock(x, list, 1), kind === "attachments" || (!inSection && i === list.length - 1)),
       mini("✕", `Remove ${KIND[kind]}`, () => { list.splice(i, 1); renderLayout(); })));
   li.dataset.k = x.k;
   li.dataset.kind = kind;
@@ -975,6 +988,7 @@ const zip = (a, b) => [...a].map((x, i) => [x, b[i]]);
 
 /** ↑ ↓ for a block: steps out of a repeat section at its ends, and into a section next to it (not a paywall). */
 function moveBlock(x, list, d) {
+  if ("attachments" in x.b) return; // always last
   const i = list.indexOf(x);
   list.splice(i, 1);
   if (list !== tpl.items) {
@@ -1045,6 +1059,7 @@ function expandClient(items, kind, list, text) {
   const render = (b, vars) => {
     const k = kindOf(b);
     if (k === "paywall" || k === "divider") return [b];
+    if (k === "attachments") return [{ files: list }];
     if (k === "button") return [{ button: { text: fill(b.button.text, vars), url: fill(b.button.url, vars), caption: fill(b.button.caption ?? "", vars) } }];
     if (k === "image" && b.image === "{preview}") return [{ ph: `animated preview of ${vars.name}` }];
     if (k === "image" && b.image === "{file}") return [{ ph: vars.file }];

@@ -16,7 +16,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Bunny, FAILED, HttpError, READY, RETRY_STATUS, VIDEO_TYPES, type Sleep } from "./bunny.ts";
 import { freeAccess, PUBLISHERS, type PostDoc, type Publisher, type Video } from "./publishers.ts";
-import { expand, loadTemplates, type Template } from "./templates.ts";
+import { attaches, expand, loadTemplates, usesBunny, type Template } from "./templates.ts";
 
 export const MAX_ATTEMPTS = 3; // fresh uploads per video per run; rerunning is how you ask for more
 const POLL_MS = 30_000;
@@ -106,8 +106,8 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
 
 /** CLI flow: upload (if any videos), build the post doc, publish it. Image-only jobs never touch Bunny. */
 export async function run(job: Job, bunny: Host | undefined, opts: { sleep?: Sleep; publishers?: Record<string, Publisher> } = {}) {
-  if (job.videos.length && !bunny) throw new Error("videos need Bunny: set BUNNY_LIBRARY_ID and BUNNY_API_KEY in .env");
-  const videos = job.videos.length ? await uploadVideos(job, bunny!, opts.sleep) : [];
+  if (needsBunny(job) && !bunny) throw new Error("videos need Bunny: set BUNNY_LIBRARY_ID and BUNNY_API_KEY in .env");
+  const videos = needsBunny(job) ? await uploadVideos(job, bunny!, opts.sleep) : localVideos(job);
   if (job.post) {
     buildPost(job, videos);
     await publishPost(job, opts.publishers);
@@ -126,6 +126,11 @@ function writeJson(path: string, data: unknown) {
 const readState = (job: Job): State => readJson<State>(statePath(job)) ?? { videos: {}, published: {} };
 const hash = (x: unknown) => createHash("sha256").update(JSON.stringify(x)).digest("hex").slice(0, 16);
 const templateOf = (job: Job): Template => loadTemplates()[job.template!];
+/** Whether the job's videos go to Bunny: always without a template (a plain upload), else only if the template shows
+ *  something from Bunny. An attachments-only template sends the files to Patreon and never touches Bunny. */
+export const needsBunny = (job: Job) => job.videos.length > 0 && (!job.template || usesBunny(templateOf(job)));
+/** The job's videos as the template sees them when they aren't on Bunny: names only, no URLs. */
+export const localVideos = (job: Job): Video[] => job.videos.map((v) => ({ title: stem(v), url: "" }));
 /** Everything the post is built from, the template's layout included. Videos count by Bunny guid, so a re-upload
  *  means a rebuild. */
 const inputsHash = (job: Job, state: State) =>
@@ -143,7 +148,10 @@ export function buildPost(job: Job, videos: Video[]): PostDoc {
     throw new Error(`${postPath(job)} was edited by hand, and the job changed since. Delete it to rebuild from the job, or undo the job change.`);
   }
   const { text, ...settings } = job.post!;
-  const doc: PostDoc = { ...settings, blocks: expand(templateOf(job), text, { videos, images: job.images }) };
+  const t = templateOf(job);
+  const files = attaches(t) ? (t.needs === "videos" ? job.videos : job.images) : []; // the job's own files, attached
+  const attachments = [...new Set([...(settings.attachments ?? []), ...files])];
+  const doc: PostDoc = { ...settings, ...(attachments.length ? { attachments } : {}), blocks: expand(t, text, { videos, images: job.images }) };
   writeJson(postPath(job), { inputs, built: hash(doc), doc } satisfies DocFile);
   return doc;
 }

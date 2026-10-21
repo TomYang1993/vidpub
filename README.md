@@ -67,6 +67,13 @@ Edit or ＋ New template opens the editor): add blocks and repeat sections, drag
 | Button | Patreon's button block: text (≤ 35), link, optional description (≤ 140) | anywhere |
 | Divider | a line | anywhere |
 | Paywall | "Paid access starts here": what's above it is free | once, not in a repeat; needs paid access |
+| Attachments | the job's files themselves (the videos), attached to the post. Patreon always shows attachments in their own section below the post, so it stays last | once, not in a repeat |
+
+A template that never uses `{preview}` or `{play}` doesn't need Bunny: its videos aren't uploaded there at all. An
+attachments-only template (for example Text `{text}` + Attachments) sends the video files straight to Patreon as
+attachments; the button then reads "Save as a Patreon draft". Patreon's attachment size limit isn't documented
+anywhere vidpub could read: a file Patreon refuses fails the send with Patreon's own message, and each attachment
+gets up to 3 hours to upload.
 
 Variables: `{text}` (the job's `post.text`) and `{count}` anywhere; in a repeat section `{name}`, `{n}`, plus
 `{preview}` `{play}` for videos or `{file}` for images. A template is only the layout: title, access and

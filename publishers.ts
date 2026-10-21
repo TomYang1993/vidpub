@@ -146,7 +146,14 @@ function editor(page: Page) {
     }
     await closeMenu();
   };
-  return { S, menuNames, closeMenu, setMenu };
+  /** Close announcement popups Patreon shows over the page (e.g. "New: now you can recommend…"). */
+  const dismissPopups = async () => {
+    for (let i = 0; i < 3 && (await page.getByRole("dialog").first().isVisible().catch(() => false)); i++) {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(400);
+    }
+  };
+  return { S, menuNames, closeMenu, setMenu, dismissPopups };
 }
 
 // ponytail: Patreon's API can't create posts, so this drives the web editor in Chrome, logged in through
@@ -157,12 +164,14 @@ export async function patreonBrowser(doc: PostDoc, jobPath: string) {
   if (!doc.access) throw new Error("patreon_browser needs doc.access, so links never go out public by accident");
   const ctx = await openPatreonProfile(false);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
-  const { S, setMenu } = editor(page);
+  const { S, setMenu, dismissPopups } = editor(page);
   try {
     if (!(await patreonLoggedIn(ctx))) fail("logged out of Patreon: run node patreon-login.ts");
     await page.bringToFront(); // a covered window stops rendering and stalls clicks
     await page.goto("https://www.patreon.com/posts/new");
     await page.waitForURL(/\/posts\/[^/]*?\d+\/edit/);
+    await S.title.waitFor();
+    await dismissPopups();
 
     if (doc.thumbnail) {
       await S.imagePost.click();
@@ -270,12 +279,21 @@ export async function patreonBrowser(doc: PostDoc, jobPath: string) {
     if (!same) fail(`content came out wrong: expected ${want.join(", ")} but got ${got.join(", ")}`);
     if ((await S.content.innerText()).includes("vidpub-block-")) fail("a marker was left in the content");
 
-    if (doc.attachments?.length) {
+    if (doc.attachments?.length) { // Patreon puts them in their own section below the post
       await S.addBlock.click();
       const chooser = page.waitForEvent("filechooser");
       await S.attachmentsBlock.click();
       await (await chooser).setFiles(doc.attachments);
-      for (const a of doc.attachments) await S.attachment(basename(a)).waitFor({ timeout: 1_800_000 });
+      // Big videos take a while. Patreon's limits aren't documented anywhere we could read, so a refusal is caught
+      // from its own message instead of waiting out the timeout.
+      const refused = page.getByText(/too large|exceeds|maximum file size|upload failed|couldn.t upload|could not upload|unsupported file/i).first();
+      for (const a of doc.attachments) {
+        // each side settles on its own, so the one that loses the race can't throw later, after Chrome closes
+        const done = S.attachment(basename(a)).waitFor({ timeout: 3 * 3600_000 }).then(() => "", () => "it didn't finish uploading in 3 hours");
+        const no = refused.waitFor({ timeout: 3 * 3600_000 }).then(async () => (await refused.innerText().catch(() => "refused")).trim(), () => new Promise<string>(() => {}));
+        const why = await Promise.race([done, no]);
+        if (why) fail(`Patreon didn't take attachment ${basename(a)}: ${why}`);
+      }
     }
 
     if (await S.paywall.count() !== (paid ? 1 : 0)) fail(`expected ${paid ? "one paywall" : "no paywall"}, found ${await S.paywall.count()}`);
@@ -314,11 +332,12 @@ const SCRATCH_TITLE = "vidpub scratch: reads your tiers and collections. Don't p
 export async function readPatreonOptions(): Promise<PatreonOptions> {
   const ctx = await openPatreonProfile(false);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
-  const { S, menuNames, closeMenu } = editor(page);
+  const { S, menuNames, closeMenu, dismissPopups } = editor(page);
   const open = async (url: string) => {
     await page.goto(url);
     await page.waitForURL(/\/posts\/[^/]*?\d+\/edit/, { timeout: 30_000 });
     await S.title.waitFor({ timeout: 30_000 });
+    await dismissPopups();
   };
   try {
     if (!(await patreonLoggedIn(ctx))) fail("logged out of Patreon: run node patreon-login.ts");

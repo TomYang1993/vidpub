@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
 import { contentHtml, type PostDoc } from "./publishers.ts";
 import { deleteVideos, download, moveVideos, pickVariant, popularity, proposeCleanup, readDeleted, searchVideos } from "./library.ts";
-import { BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate } from "./templates.ts";
+import { attaches, BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate, usesBunny } from "./templates.ts";
 import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "vidpub-"));
@@ -370,4 +370,24 @@ test("delete: logged only once Bunny deletes; already-gone counts as deleted; on
   assert.equal(h.count, 1); // b failed, c was already gone: neither is logged as deleted by us
   assert.deepEqual([h.recent[0].id, h.recent[0].reason, h.bytes], [a, "no views in the last 90 days", 100]);
   await assert.rejects(deleteVideos(lib, ["../collections/x"], log), /not a video id/);
+});
+
+test("attachments template: the files go on the post, nothing goes to Bunny", async () => {
+  const t = checkTemplate({ name: "Files", needs: "videos", blocks: [{ attachments: true }, { text: "{text}" }] });
+  assert.deepEqual(t.blocks, [{ text: "{text}" }, { attachments: true }]); // kept last: Patreon shows them below the post
+  assert.ok(attaches(t) && !usesBunny(t));
+  assert.ok(usesBunny(BUILTIN[0]) && !attaches(BUILTIN[0]));
+  assert.throws(() => checkTemplate({ name: "x", needs: "videos", blocks: [{ repeat: [{ attachments: true }] }] }), /outside the repeat section/);
+  assert.throws(() => checkTemplate({ name: "x", needs: "videos", blocks: [{ attachments: true }, { attachments: true }] }), /attachments only once/);
+  assert.throws(() => checkTemplate({ name: "x", needs: "videos", blocks: [{ text: "hi" }] }), /add a repeat section or attachments/);
+  saveTemplate({ name: "Files", needs: "videos", blocks: [{ text: "{text}" }, { attachments: true }] });
+  const path = job("attach", ["b.mp4", "a.mp4", "notes.pdf"], {
+    template: "files", videos: ["a.mp4", "b.mp4"], post: { title: "T", text: "Here they are", access: "paid", attachments: ["notes.pdf"] }, publish: ["patreon_manual"],
+  });
+  const rec = recorder();
+  const j = loadJob(path, rec.publishers);
+  await run(j, undefined, { publishers: rec.publishers }); // no Bunny client at all: it isn't needed
+  assert.deepEqual(rec.calls[0].blocks, [{ text: "Here they are" }]);
+  assert.deepEqual(rec.calls[0].attachments, ["notes.pdf", "a.mp4", "b.mp4"].map((f) => join(tmp, "attach", f)));
+  deleteTemplate("files");
 });

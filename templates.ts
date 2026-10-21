@@ -1,13 +1,16 @@
 // Templates: a post layout as data. A layout is a list of blocks and repeat sections; a repeat section's blocks
 // come out once per video (or image), in order. Blocks use {variables}: {text} and {count} anywhere; inside a
 // repeat, {name} and {n} plus {preview} {play} (videos) or {file} (images).
+// { attachments: true } attaches the job's files themselves to the post. Patreon always shows attachments in their own
+// section below the post, so it isn't a position in the layout: it's kept last. A template that never uses {preview}
+// or {play} doesn't need Bunny, so its videos aren't uploaded there.
 // Built-ins live here; saved ones are ~/.vidpub/templates/<id>.json and override a built-in with the same id.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BUTTON_CAPTION_MAX, BUTTON_TEXT_MAX, type Block, type Video } from "./publishers.ts";
 
-export type Item = Block | { repeat: Block[] };
+export type Item = Block | { repeat: Block[] } | { attachments: true };
 export type Template = {
   id: string;
   name: string;
@@ -80,10 +83,15 @@ export function checkTemplate(raw: any): Template {
   const inner = [...outer, ...(EACH_VARS[needs as "videos"] ?? [])];
   const blocks = (Array.isArray(raw.blocks) ? raw.blocks : []).flatMap((b: any, i: number): Item[] => {
     const at = `block ${i + 1}`;
+    if (b && typeof b === "object" && "attachments" in b) {
+      if (Object.keys(b).length !== 1 || b.attachments !== true) return problems.push(`${at}: attachments is true`), [];
+      return [{ attachments: true as const }];
+    }
     if (b && typeof b === "object" && "repeat" in b) {
       if (Object.keys(b).length !== 1 || !Array.isArray(b.repeat) || !b.repeat.length) return problems.push(`${at}: a repeat section has blocks`), [];
       const each = b.repeat.flatMap((x: any, j: number) => {
         if (x && typeof x === "object" && "repeat" in x) return problems.push(`${at}: repeat sections can't nest`), [];
+        if (x && typeof x === "object" && "attachments" in x) return problems.push(`${at}: attachments are the post's files: add them outside the repeat section`), [];
         return [checkBlock(x, `${at}, repeat block ${j + 1}`, inner, true, problems)].filter((y): y is Block => !!y);
       });
       return [{ repeat: each }];
@@ -91,11 +99,18 @@ export function checkTemplate(raw: any): Template {
     const block = checkBlock(b, at, outer, false, problems);
     return block ? [block] : [];
   });
-  if (!blocks.some((b: Item) => "repeat" in b)) problems.push(`add a repeat section, or the ${needs ?? "files"} won't be in the post`);
+  if (!blocks.some((b: Item) => "repeat" in b || "attachments" in b)) problems.push(`add a repeat section or attachments, or the ${needs ?? "files"} won't be in the post`);
+  if (blocks.filter((b: Item) => "attachments" in b).length > 1) problems.push("attachments only once");
   if (blocks.filter((b: Item) => "paywall" in b).length > 1) problems.push("only one paywall per post");
   if (problems.length) throw new Error(problems.join("\n"));
-  return { id, name, needs, blocks };
+  const last = (b: Item) => ("attachments" in b ? 1 : 0); // where Patreon shows them
+  return { id, name, needs, blocks: [...blocks].sort((a: Item, z: Item) => last(a) - last(z)) };
 }
+
+/** Whether the template attaches the job's files to the post. */
+export const attaches = (t: Template) => t.blocks.some((b) => "attachments" in b);
+/** Whether the template shows anything from Bunny ({preview}, {play}); if not, videos aren't uploaded there. */
+export const usesBunny = (t: Template) => /\{(preview|play)\}/.test(JSON.stringify(t.blocks));
 
 /** Built-ins plus saved templates, by id. A broken saved file is skipped with a warning, never fatal. */
 export function loadTemplates(dir = templateDir()): Record<string, Template> {
@@ -152,5 +167,5 @@ export function expand(t: Template, text: string | undefined, items: { videos?: 
   const each = (repeat: Block[]) => list.flatMap((item, i) => render(repeat, typeof item === "string"
     ? { ...global, n: String(i + 1), file: item, name: item.split("/").pop()!.replace(/\.[^.]+$/, "") }
     : { ...global, n: String(i + 1), name: item.title, play: item.url, preview: item.preview ?? "" }));
-  return t.blocks.flatMap((b) => ("repeat" in b ? each(b.repeat) : render([b], global)));
+  return t.blocks.flatMap((b) => ("attachments" in b ? [] : "repeat" in b ? each(b.repeat) : render([b], global)));
 }

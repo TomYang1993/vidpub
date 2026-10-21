@@ -19,7 +19,7 @@ import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
 import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
 import { deleteVideos, download, listCollections, moveVideos, popularity, proposeCleanup, readDeleted, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
 import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
-import { buildPost, IMAGE_TYPES, loadJob, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
+import { buildPost, IMAGE_TYPES, loadJob, localVideos, needsBunny, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
 /** A job as the page sends it: names of files in the picked folder instead of paths. */
 export type Form = {
@@ -241,7 +241,7 @@ export function serve(opts: {
     const prev = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { videos: {}, published: {} };
     return {
       id: nextId++, dir, jobPath: job.path, step, state: "queued", added: Date.now(), links: [], log: [],
-      videos: step === "upload" ? job.videos.map((v) => ({ name: basename(v), label: prev.videos[v]?.guid ? "on Bunny from a past run" : "waiting", pct: null })) : [],
+      videos: step === "upload" && needsBunny(job) ? job.videos.map((v) => ({ name: basename(v), label: prev.videos[v]?.guid ? "on Bunny from a past run" : "waiting", pct: null })) : [],
       publish: job.publish.map((name) => ({ name, running: false, result: prev.published[name] })),
     };
   }
@@ -332,7 +332,7 @@ export function serve(opts: {
       if (problems.length) throw fail(400, `Not starting:\n${problems.join("\n")}`);
     }
     const env = readEnv();
-    if (job.videos.length && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
+    if (needsBunny(job) && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
       throw fail(400, "Saved job.json. Add your Bunny library ID and API key in Settings, then Start.");
     }
     needLogin(job); // now, not after hours of uploading
@@ -340,7 +340,7 @@ export function serve(opts: {
     const { onEvent, onUpload } = track(cur, job);
     enqueue(cur, {
       upload: async () => {
-        const videos = job.videos.length ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : [];
+        const videos = needsBunny(job) ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : localVideos(job);
         if (!job.post) return "videos are ready";
         if (rebuild) rmSync(postPath(job), { force: true }); // drop hand edits the job no longer matches
         buildPost(job, videos);
