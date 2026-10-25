@@ -17,7 +17,7 @@ export const BUTTON_CAPTION_MAX = 140;
 export type PostDoc = {
   title: string;
   access: string | string[]; // "public" | "patrons" | "paid" | list of tier names
-  collection?: string; // Patreon collection (not the Bunny one)
+  collection?: string | string[]; // Patreon collection(s): a post can be in several (not the Bunny one)
   thumbnail?: string; // image path
   attachments?: string[]; // file paths
   publishNow?: boolean; // patreon_browser: publish right away instead of leaving a draft to review
@@ -25,6 +25,9 @@ export type PostDoc = {
 };
 export type Video = { title: string; url: string; preview?: string }; // preview: animated WebP
 export type Publisher = (doc: PostDoc, jobPath: string) => string | Promise<string>;
+
+/** The post's Patreon collections as a list (a job may give one name or several). */
+export const collectionsOf = (doc: Pick<PostDoc, "collection">) => [...new Set([doc.collection ?? []].flat().filter((c) => typeof c === "string" && c.trim()))];
 
 /** Free access can't have a paywall: Patreon only shows one on paid posts. */
 export const freeAccess = (access: PostDoc["access"]) => access === "public" || access === "patrons";
@@ -44,7 +47,7 @@ export function patreonManual(doc: PostDoc, jobPath: string) {
     `Title: ${doc.title}`,
     doc.thumbnail && `Thumbnail: ${doc.thumbnail}`,
     `Access: ${[doc.access].flat().join(", ")}`,
-    doc.collection && `Collection: ${doc.collection}`,
+    collectionsOf(doc).length && `Collections: ${collectionsOf(doc).join(", ")}`,
     ...(doc.attachments ?? []).map((a) => `Attach: ${a}`),
   ].filter(Boolean).join("\n");
   const out = `${jobPath}.patreon.txt`;
@@ -298,7 +301,8 @@ export async function patreonBrowser(doc: PostDoc, jobPath: string) {
 
     if (await S.paywall.count() !== (paid ? 1 : 0)) fail(`expected ${paid ? "one paywall" : "no paywall"}, found ${await S.paywall.count()}`);
 
-    if (doc.collection) await setMenu(S.collections, "collection", () => [doc.collection!], false);
+    const collections = collectionsOf(doc);
+    if (collections.length) await setMenu(S.collections, "collection", () => collections, false);
 
     await page.waitForTimeout(2000); // let the autosave start, then wait for it to finish
     await S.saving.waitFor({ state: "hidden", timeout: 120_000 });

@@ -96,6 +96,10 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
     else if (!existsSync(v)) problems.push(`missing: ${v}`);
   }
   if (job.post && !job.post.title) problems.push("post.title is required");
+  const pc = job.post?.collection;
+  if (pc !== undefined && typeof pc !== "string" && !(Array.isArray(pc) && pc.every((c) => typeof c === "string"))) {
+    problems.push("post.collection is a Patreon collection name or a list of them");
+  }
   if (job.post && !job.post.access) problems.push(`post.access is required: "public", "patrons", "paid" or a list of tiers`);
   for (const f of [job.post?.thumbnail, ...(job.post?.attachments ?? [])]) if (f && !existsSync(f)) problems.push(`missing: ${f}`);
   for (const p of job.publish) if (!Object.hasOwn(publishers, p)) problems.push(`unknown publisher: ${p}`);

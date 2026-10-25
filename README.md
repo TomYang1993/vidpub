@@ -40,7 +40,7 @@ one of yours (see [Templates](#templates)):
 | `post.title`, `post.access` | required. Access: `"public"`, `"patrons"`, `"paid"` or a list of tier names |
 | `post.text` | fills the template's `{text}`; URLs become links |
 | `post.thumbnail`, `post.attachments` | file paths |
-| `post.collection` | Patreon collection (not the Bunny one) |
+| `post.collection` | Patreon collection name, or a list of them: a post can be in several (not the Bunny collection) |
 | `post.publishNow` | `patreon_browser` only: `true` publishes, default leaves a draft to review |
 | `publish` | `patreon_manual` and/or `patreon_browser`; default `["patreon_manual"]` when there's a post |
 

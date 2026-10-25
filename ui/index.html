@@ -245,8 +245,10 @@
             <p class="hint" id="thumb-status" style="margin: 4px 0 0"></p>
           </div>
         </div>
-        <label for="pcollection">Patreon collection <span class="hint">optional</span></label>
-        <select id="pcollection"></select>
+        <fieldset>
+          <legend>Patreon collections <span class="hint">optional</span></legend>
+          <div class="tierlist" id="pcollection"></div>
+        </fieldset>
         <div class="row hint" style="margin-top: 8px">
           <button type="button" id="refresh" class="linkish">↻ Read tiers and collections from Patreon</button>
           <span id="refresh-status" role="status"></span>
@@ -518,14 +520,19 @@ const accessOf = (selId, boxId) => {
   const tiers = [...$(boxId).querySelectorAll("input:checked")].map((c) => c.value);
   return a === "tiers" ? (tiers.length ? tiers : undefined) : a || undefined;
 };
-function setCollection(selId, value) {
-  const names = [...new Set([...patreon.collections, ...(value ? [value] : [])])];
-  $(selId).replaceChildren(el("option", { value: "", textContent: "None" }), ...names.map((n) => el("option", { value: n, textContent: n })));
-  $(selId).value = value ?? "";
+/** Collections as checkboxes: a post can be in several. value: a name, a list, or undefined. */
+function setCollection(boxId, value) {
+  const checked = [value ?? []].flat().filter(Boolean);
+  const names = [...new Set([...patreon.collections, ...checked])];
+  $(boxId).replaceChildren(...(names.length ? names.map((n) => el("label", { className: "check" },
+    el("input", { type: "checkbox", value: n, checked: checked.includes(n) }),
+    el("span", { textContent: n }, !patreon.collections.includes(n) && patreon.read ? el("span", { className: "hint warn", textContent: "  not on Patreon anymore" }) : null)))
+    : [el("p", { className: "hint", textContent: "No collections yet: read them from Patreon below." })]));
 }
+const collectionsPicked = (boxId) => [...$(boxId).querySelectorAll("input:checked")].map((c) => c.value);
 function renderPatreon() { // keep what's picked while the lists change
   setAccess("access", "tiers", accessOf("access", "tiers") ?? $("access").value);
-  setCollection("pcollection", $("pcollection").value);
+  setCollection("pcollection", collectionsPicked("pcollection"));
   $("refresh-status").textContent = patreon.read ? `Last read ${new Date(patreon.read).toLocaleString()}.` : "";
 }
 $("access").onchange = () => setAccess("access", "tiers");
@@ -704,7 +711,7 @@ function form() {
       text: $("text").value.trim() || undefined,
       access: accessOf("access", "tiers"),
       thumbnail: $("thumbnail").value || undefined,
-      collection: $("pcollection").value || undefined,
+      collection: collectionsPicked("pcollection").length ? collectionsPicked("pcollection") : undefined,
       attachments: checked("#attachments input"),
       publishNow: $("publish-now").checked || undefined,
     },

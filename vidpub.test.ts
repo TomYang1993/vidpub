@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Bunny } from "./bunny.ts";
-import { contentHtml, type PostDoc } from "./publishers.ts";
+import { collectionsOf, contentHtml, patreonManual, type PostDoc } from "./publishers.ts";
 import { deleteVideos, download, moveVideos, pickVariant, popularity, proposeCleanup, readDeleted, searchVideos } from "./library.ts";
 import { attaches, BUILTIN, checkTemplate, deleteTemplate, expand, loadTemplates, saveTemplate, usesBunny } from "./templates.ts";
 import { MAX_ATTEMPTS, buildPost, loadJob, publishPost, run, savePost } from "./vidpub.ts";
@@ -390,4 +390,16 @@ test("attachments template: the files go on the post, nothing goes to Bunny", as
   assert.deepEqual(rec.calls[0].blocks, [{ text: "Here they are" }]);
   assert.deepEqual(rec.calls[0].attachments, ["notes.pdf", "a.mp4", "b.mp4"].map((f) => join(tmp, "attach", f)));
   deleteTemplate("files");
+});
+
+test("Patreon collections: one name or a list; anything else is refused; the manual checklist lists them all", () => {
+  assert.deepEqual(collectionsOf({ collection: "Asia" }), ["Asia"]);
+  assert.deepEqual(collectionsOf({ collection: ["Asia", "Europa America", "Asia", ""] }), ["Asia", "Europa America"]);
+  assert.deepEqual(collectionsOf({}), []);
+  const spec = (collection: unknown) => ({ template: "image-gallery", images: ["a.jpg"], post: { title: "T", access: "paid", collection }, publish: [] });
+  assert.doesNotThrow(() => loadJob(job("coll-ok", ["a.jpg"], spec(["Asia", "Europa America"]))));
+  assert.throws(() => loadJob(job("coll-bad", ["a.jpg"], spec([1, 2]))), /post.collection is a Patreon collection name or a list/);
+  const out = join(tmp, "coll-manual");
+  patreonManual({ title: "T", access: "paid", collection: ["Asia", "Europa America"], blocks: [] }, out);
+  assert.match(readFileSync(`${out}.patreon.txt`, "utf8"), /Collections: Asia, Europa America/);
 });
