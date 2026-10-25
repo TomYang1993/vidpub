@@ -883,15 +883,17 @@ function openEditor(t) {
   $("t-delete").textContent = ["video-previews", "image-gallery"].includes(t.id) ? "Reset to built-in" : "Delete";
   $("t-errors").textContent = $("t-status").textContent = "";
   renderLayout();
-  tplDirty = false;
+  tplSaved = tplSig();
   $("tpl").showModal();
   $("t-name").focus();
 }
-let tplDirty = false; // unsaved edits: Esc and Close ask first
+// Unsaved edits = the editor differs from what was opened or last saved (not "something redrew"): Esc and Close ask.
+let tplSaved = "";
+const tplSig = () => JSON.stringify([$("t-name").value.trim(), tpl.needs, tpl.items.map((x) => (isSection(x) ? { repeat: x.repeat.map((y) => y.b) } : x.b))]);
 $("t-new").onclick = () => openEditor(null);
 $("t-cancel").onclick = $("t-x").onclick = () => closeEditor();
 function closeEditor() {
-  if (tplDirty && !confirm("Close without saving this template?")) return false;
+  if (tplSig() !== tplSaved && !confirm("Close without saving this template?")) return false;
   $("tpl").close();
   return true;
 }
@@ -1084,7 +1086,6 @@ function renderSample() {
   const list = files.length ? files : tpl.needs === "videos" ? ["first clip.mp4", "second clip.mp4"] : ["photo-1.jpg", "photo-2.jpg"];
   $("t-sample-hint").textContent = files.length ? `with the ${files.length} ${tpl.needs} selected in your folder` : `with two made-up ${tpl.needs}; pick a folder to see yours`;
   const blocks = expandClient(tpl.items, tpl.needs, list, $("text").value.trim());
-  tplDirty = true;
   $("t-sample").replaceChildren(el("h1", { textContent: $("title").value.trim() || $("t-name").value || "Post title" }),
     ...(blocks.length ? blocks.map(pageBlock) : [el("p", { className: "empty", textContent: "Add blocks to see the post." })]));
 }
@@ -1101,7 +1102,7 @@ $("t-save").onclick = async () => {
     tpl.id = r.id;
     $("t-head").textContent = `Template: ${body.name.trim()}`;
     $("t-status").textContent = "Saved.";
-    tplDirty = false;
+    tplSaved = tplSig();
     $("t-delete").hidden = false;
     $("t-delete").textContent = ["video-previews", "image-gallery"].includes(r.id) ? "Reset to built-in" : "Delete";
     if (template === r.id || !folder) pickTemplate(r.id);
