@@ -228,7 +228,7 @@ export function serve(opts: {
         return {
           dir, job: basename(jobPath), mtime: statSync(existsSync(`${jobPath}.state.json`) ? `${jobPath}.state.json` : jobPath).mtimeMs,
           videos: paths.length, uploaded: paths.filter((p) => state.videos?.[p]?.guid).length, images: raw.images?.length ?? 0,
-          publish: raw.publish ?? [], published: state.published ?? {}, built: existsSync(`${jobPath}.post.json`),
+          publish: raw.publish ?? [], published: state.published ?? {}, drafts: state.drafts ?? {}, built: existsSync(`${jobPath}.post.json`),
           queued: mine?.state === "queued", running: mine?.state === "running", error: mine?.state === "failed" ? mine.error : undefined,
         };
       });

@@ -35,7 +35,9 @@ export type Job = {
 };
 export type Host = Pick<Bunny, "findOrCreateCollection" | "createVideo" | "status" | "deleteVideo" | "tusCreate" | "tusUpload" | "playUrl" | "previewUrl">;
 type Rec = { guid?: string; tusUrl?: string | null };
-type State = { collection?: { name: string; id: string }; videos: Record<string, Rec>; published: Record<string, string> };
+// drafts: the draft each publisher was working on, recorded as soon as it exists; a send that was interrupted
+// finishes that draft on the next try instead of starting another
+type State = { collection?: { name: string; id: string }; videos: Record<string, Rec>; published: Record<string, string>; drafts?: Record<string, string> };
 /** Progress for a UI. statuses are Bunny's REST codes, -1 = check failed; publish fires before (no result) and after. */
 export type RunEvent =
   | { type: "upload"; video: string; fresh: boolean; attempt: number }
@@ -177,7 +179,13 @@ export async function publishPost(job: Job, publishers: Record<string, Publisher
   if (file.inputs !== inputsHash(job, state)) throw new Error(`the job changed since ${postPath(job)} was built: rebuild and review it before publishing`);
   for (const name of pending) {
     onEvent({ type: "publish", name });
-    state.published[name] = await publishers[name](file.doc, job.path);
+    state.published[name] = await publishers[name](file.doc, job.path, {
+      draft: state.drafts?.[name],
+      onDraft: (url) => {
+        state.drafts = { ...state.drafts, [name]: url };
+        writeJson(statePath(job), state);
+      },
+    });
     writeJson(statePath(job), state);
     onEvent({ type: "publish", name, result: state.published[name] });
   }

@@ -403,3 +403,26 @@ test("Patreon collections: one name or a list; anything else is refused; the man
   patreonManual({ title: "T", access: "paid", collection: ["Asia", "Europa America"], blocks: [] }, out);
   assert.match(readFileSync(`${out}.patreon.txt`, "utf8"), /Collections: Asia, Europa America/);
 });
+
+test("an interrupted send records its draft, and the next send finishes that draft", async () => {
+  const path = job("resume", ["a.jpg"], { template: "image-gallery", images: ["a.jpg"], post: { title: "T", access: "paid" }, publish: ["p"] });
+  const seen: (string | undefined)[] = [];
+  let first = true;
+  const publishers = {
+    p: (_doc: PostDoc, _job: string, opts?: { draft?: string; onDraft?: (url: string) => void }) => {
+      seen.push(opts?.draft);
+      opts?.onDraft?.(opts.draft ?? "https://www.patreon.com/posts/42/edit");
+      if (first) { first = false; throw new Error("Chrome closed"); } // interrupted after the draft existed
+      return "https://www.patreon.com/posts/42/edit";
+    },
+  };
+  const j = loadJob(path, publishers);
+  buildPost(j, []);
+  await assert.rejects(publishPost(j, publishers), /Chrome closed/);
+  const state = () => JSON.parse(readFileSync(`${path}.state.json`, "utf8"));
+  assert.deepEqual(state().drafts, { p: "https://www.patreon.com/posts/42/edit" });
+  assert.deepEqual(state().published, {});
+  await publishPost(j, publishers);
+  assert.deepEqual(seen, [undefined, "https://www.patreon.com/posts/42/edit"]); // the second send was handed the draft
+  assert.equal(state().published.p, "https://www.patreon.com/posts/42/edit");
+});

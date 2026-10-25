@@ -1450,9 +1450,11 @@ async function loadJobs() {
     const [text, cls] = j.running ? ["running", "run"] : j.queued ? ["queued", ""] : j.error ? ["failed", "bad"] : published || (!j.publish.length && j.uploaded === j.videos) ? ["done", "ok"]
       : j.built ? ["not sent", ""] : ["unfinished", ""];
     const results = Object.entries(j.published).map(([name, r]) => el("div", {}, `${name}: `, link(r, /\/edit$/.test(r) ? "draft" : r)));
+    const unfinished = Object.entries(j.drafts ?? {}).filter(([name]) => !j.published[name]); // a send that was interrupted
+    results.push(...unfinished.map(([, r]) => el("div", {}, link(r, "unfinished draft"))));
     const open = el("button", { type: "button", textContent: "Open", onclick: () => openFolder(j.dir).then(() => show("new"), (e) => alert(e.message)) });
     const send = j.built && !published && !j.running && !j.queued
-      && el("button", { type: "button", textContent: "Send", onclick: () => api("/api/publish", { dir: j.dir }).catch((e) => alert(e.message)) });
+      && el("button", { type: "button", textContent: unfinished.length ? "Finish sending" : "Send", onclick: () => api("/api/publish", { dir: j.dir }).catch((e) => alert(e.message)) });
     const files = [j.videos && `${j.uploaded}/${j.videos} videos on Bunny`, j.images && `${j.images} images`].filter(Boolean).join(", ");
     return el("tr", {},
       el("td", {}, el("span", { textContent: j.dir.split("/").pop() }), el("span", { className: "hint", textContent: j.job })),

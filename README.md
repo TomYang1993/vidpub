@@ -194,7 +194,11 @@ publishers work around that:
   checklist (title, thumbnail, access, collection, attachments) to apply in the editor yourself.
 - **`patreon_browser`** fills in Patreon's web editor for you: access, thumbnail (as the post's cover image), title,
   the blocks (text, links, images: URLs inserted by URL, files uploaded; buttons, dividers, the paywall), attachments,
-  collection. It checks every block came out in order, then leaves a **draft** and prints its URL. Set
+  collection. It checks every block came out in order, then leaves a **draft** and prints its URL. Access and
+  collections are set and saved first, before any slow upload, and applied again at the end. The job records its
+  draft as soon as it exists: if a send is interrupted (Chrome closed, Mac asleep, Ctrl+C), **Send again** /
+  **Finish sending** continues that draft and uploads only the attachments it doesn't have yet, instead of starting
+  over. Don't open a draft in your own browser while vidpub is sending it: Patreon allows one editor per post. Set
   `post.publishNow: true` to publish instead. `post.access` is required, so links never go out public by
   accident.
 

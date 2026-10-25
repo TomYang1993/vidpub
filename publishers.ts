@@ -24,7 +24,10 @@ export type PostDoc = {
   blocks: Block[];
 };
 export type Video = { title: string; url: string; preview?: string }; // preview: animated WebP
-export type Publisher = (doc: PostDoc, jobPath: string) => string | Promise<string>;
+/** draft: a draft an earlier, interrupted send left, to finish instead of starting another; onDraft: called as soon
+ *  as the publisher has a draft, so the job can record it. */
+export type PublishOpts = { draft?: string; onDraft?: (url: string) => void };
+export type Publisher = (doc: PostDoc, jobPath: string, opts?: PublishOpts) => string | Promise<string>;
 
 /** The post's Patreon collections as a list (a job may give one name or several). */
 export const collectionsOf = (doc: Pick<PostDoc, "collection">) => [...new Set([doc.collection ?? []].flat().filter((c) => typeof c === "string" && c.trim()))];
@@ -163,20 +166,35 @@ function editor(page: Page) {
 // patreon-login.ts. Unofficial: it breaks when Patreon changes the editor. Selectors were calibrated in Oct 2026
 // and all live in editor(). Headed on purpose: Cloudflare blocks headless Chrome. Every field is checked before
 // Publish is touched; a failure leaves an unpublished draft plus <job>.patreon-error.png.
-export async function patreonBrowser(doc: PostDoc, jobPath: string) {
+export async function patreonBrowser(doc: PostDoc, jobPath: string, opts: PublishOpts = {}) {
   if (!doc.access) throw new Error("patreon_browser needs doc.access, so links never go out public by accident");
   const ctx = await openPatreonProfile(false);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   const { S, setMenu, dismissPopups } = editor(page);
+  const open = async (url: string) => {
+    await page.goto(url);
+    await page.waitForURL(/\/posts\/[^/]*?\d+\/edit/, { timeout: 30_000 });
+    await S.title.waitFor();
+  };
+  /** Let Patreon's autosave start, then wait until it says Saved. */
+  const saveNow = async () => {
+    await page.waitForTimeout(2000);
+    await S.saving.waitFor({ state: "hidden", timeout: 120_000 });
+    await S.saved.waitFor();
+  };
   try {
     if (!(await patreonLoggedIn(ctx))) fail("logged out of Patreon: run node patreon-login.ts");
     await page.bringToFront(); // a covered window stops rendering and stalls clicks
-    await page.goto("https://www.patreon.com/posts/new");
-    await page.waitForURL(/\/posts\/[^/]*?\d+\/edit/);
-    await S.title.waitFor();
+    // An earlier, interrupted send of this job left a draft: finish that one instead of starting another (and skip the
+    // attachments it already has). If it's gone (deleted), start fresh.
+    const resumed = !!opts.draft && (await open(opts.draft).then(() => true, () => false));
+    if (!resumed) await open("https://www.patreon.com/posts/new");
+    opts.onDraft?.(page.url()); // recorded now, so an interrupted send can be found and finished
     await dismissPopups();
+    console.log(resumed ? `continuing draft ${page.url()}` : `new draft ${page.url()}`);
 
-    if (doc.thumbnail) {
+    if (doc.thumbnail && resumed) console.log("thumbnail: left as it is on the draft");
+    if (doc.thumbnail && !resumed) {
       await S.imagePost.click();
       const chooser = page.waitForEvent("filechooser");
       await S.browse.click();
@@ -184,28 +202,44 @@ export async function patreonBrowser(doc: PostDoc, jobPath: string) {
       await S.thumbnailUploaded.waitFor({ timeout: 300_000 });
     }
 
-    // Access first. Switching to paid makes Patreon add its own paywall at the top, and switching to free removes
-    // every paywall, so it has to happen before ours goes in.
+    // Settings first: access (switching to paid makes Patreon add its own paywall at the top, and switching to free
+    // removes every paywall, so it has to happen before ours goes in) and collections, saved before anything slow,
+    // so an interrupted upload can't leave the post without them. Both are applied again at the end.
     const access = doc.access;
     const paid = !freeAccess(access);
     if (!paid && doc.blocks.some((b) => "paywall" in b)) fail(`a paywall needs paid access, not ${access}`);
-    if (!paid) {
-      await S.free.click();
-      await S.freeMore.click();
-      const radio = S.freeAudience(access === "public" ? "Public" : "All_Members");
-      await radio.locator("xpath=following-sibling::*[@role='button']").click();
-      if (!(await radio.isChecked())) fail(`couldn't set access ${access}`);
-      await S.freeMoreClose.click();
-    } else {
-      await S.paid.click();
-      if (!(await S.paidMembers.isChecked())) await S.paidMembers.click();
-      if (access === "paid") await setMenu(S.tiers, "tier", (all) => all, true);
-      else if (Array.isArray(access)) await setMenu(S.tiers, "tier", () => access, true);
-      else fail(`doc.access must be "public", "patrons", "paid" or a list of tiers, not ${JSON.stringify(access)}`);
-    }
-    if (!(await (paid ? S.paid : S.free).isChecked())) fail("access didn't stick");
-
+    const applyAccess = async () => {
+      if (!paid) {
+        if (!(await S.free.isChecked())) await S.free.click();
+        await S.freeMore.click();
+        const radio = S.freeAudience(access === "public" ? "Public" : "All_Members");
+        if (!(await radio.isChecked())) await radio.locator("xpath=following-sibling::*[@role='button']").click();
+        if (!(await radio.isChecked())) fail(`couldn't set access ${access}`);
+        await S.freeMoreClose.click();
+      } else {
+        if (!(await S.paid.isChecked())) await S.paid.click();
+        if (!(await S.paidMembers.isChecked())) await S.paidMembers.click();
+        if (access === "paid") await setMenu(S.tiers, "tier", (all) => all, true);
+        else if (Array.isArray(access)) await setMenu(S.tiers, "tier", () => access, true);
+        else fail(`doc.access must be "public", "patrons", "paid" or a list of tiers, not ${JSON.stringify(access)}`);
+      }
+      if (!(await (paid ? S.paid : S.free).isChecked())) fail("access didn't stick");
+    };
+    const collections = collectionsOf(doc);
+    const applyCollections = async () => {
+      if (collections.length) await setMenu(S.collections, "collection", () => collections, true);
+    };
+    await applyAccess();
+    await applyCollections();
     await S.title.fill(doc.title);
+    await saveNow();
+    console.log(`access${collections.length ? " and collections" : ""} set and saved`);
+
+    if (resumed) { // start the body over: the interrupted send may have left part of it
+      await S.content.click();
+      await page.keyboard.press("Meta+a");
+      await page.keyboard.press("Backspace");
+    }
     // A paid post always has exactly one paywall; without one in the doc it goes on top, so everything is locked.
     const blocks = paid && !doc.blocks.some((b) => "paywall" in b) ? [{ paywall: true } as const, ...doc.blocks] : doc.blocks;
     // Paragraphs and links are pasted in one go, with a marker line where each other block goes. Markers are then
@@ -282,31 +316,37 @@ export async function patreonBrowser(doc: PostDoc, jobPath: string) {
     if (!same) fail(`content came out wrong: expected ${want.join(", ")} but got ${got.join(", ")}`);
     if ((await S.content.innerText()).includes("vidpub-block-")) fail("a marker was left in the content");
 
-    if (doc.attachments?.length) { // Patreon puts them in their own section below the post
+    const todo: string[] = []; // attachments the draft doesn't have yet (a resumed draft may have some)
+    for (const a of doc.attachments ?? []) if (!(await S.attachment(basename(a)).count())) todo.push(a);
+    if (todo.length < (doc.attachments?.length ?? 0)) console.log(`${doc.attachments!.length - todo.length} attachments are already on the draft`);
+    if (todo.length) { // Patreon puts them in their own section below the post
+      console.log(`uploading ${todo.length} attachment${todo.length === 1 ? "" : "s"} to Patreon`);
       await S.addBlock.click();
       const chooser = page.waitForEvent("filechooser");
       await S.attachmentsBlock.click();
-      await (await chooser).setFiles(doc.attachments);
+      await (await chooser).setFiles(todo);
       // Big videos take a while. Patreon's limits aren't documented anywhere we could read, so a refusal is caught
       // from its own message instead of waiting out the timeout.
       const refused = page.getByText(/too large|exceeds|maximum file size|upload failed|couldn.t upload|could not upload|unsupported file/i).first();
-      for (const a of doc.attachments) {
+      for (const [i, a] of todo.entries()) {
         // each side settles on its own, so the one that loses the race can't throw later, after Chrome closes
         const done = S.attachment(basename(a)).waitFor({ timeout: 3 * 3600_000 }).then(() => "", () => "it didn't finish uploading in 3 hours");
         const no = refused.waitFor({ timeout: 3 * 3600_000 }).then(async () => (await refused.innerText().catch(() => "refused")).trim(), () => new Promise<string>(() => {}));
         const why = await Promise.race([done, no]);
         if (why) fail(`Patreon didn't take attachment ${basename(a)}: ${why}`);
+        console.log(`  attached ${basename(a)} (${i + 1}/${todo.length})`);
       }
     }
 
+    await applyAccess(); // again: hours may have passed, and nothing may have dropped them
+    await applyCollections();
     if (await S.paywall.count() !== (paid ? 1 : 0)) fail(`expected ${paid ? "one paywall" : "no paywall"}, found ${await S.paywall.count()}`);
-
-    const collections = collectionsOf(doc);
-    if (collections.length) await setMenu(S.collections, "collection", () => collections, false);
-
-    await page.waitForTimeout(2000); // let the autosave start, then wait for it to finish
-    await S.saving.waitFor({ state: "hidden", timeout: 120_000 });
-    await S.saved.waitFor();
+    await saveNow();
+    // Patreon allows one editor per post; if it was opened elsewhere meanwhile, this tab's changes may not have stuck
+    const elsewhere = page.getByText(/another (tab|window|device|browser)|opened elsewhere|editing this post (in|on)/i).first();
+    if (await elsewhere.isVisible().catch(() => false)) {
+      fail(`Patreon says the post is open elsewhere ("${(await elsewhere.innerText()).trim()}"): close it there, then Send again`);
+    }
     const id = page.url().match(/(\d+)\/edit/)![1];
     if (!doc.publishNow) {
       console.log(`Patreon draft saved: ${page.url()} (review, then publish)`);
