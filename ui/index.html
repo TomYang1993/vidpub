@@ -118,7 +118,7 @@
   ul.blocks > li.dragging { opacity: 0.35; }
   ul.blocks textarea { min-height: 38px; }
   .section-head { display: flex; gap: 8px; align-items: center; font-weight: 600; font-size: 13px; }
-  .section-head select { width: auto; padding: 2px 6px; font-size: 13px; }
+  .section-head select, select.needs { width: auto; padding: 2px 6px; font-size: 13px; }
   .section-head .move { margin-left: auto; }
   .btnf { display: grid; grid-template-columns: 1fr 1.4fr; gap: 6px; }
   .btnf input:last-child { grid-column: 1 / -1; }
@@ -935,11 +935,18 @@ function renderLayout() {
 
 const mini = (text, label, fn, disabled) => Object.assign(el("button", { type: "button", textContent: text, onclick: fn, disabled }), { ariaLabel: label });
 
+/** What the template works on, videos or images: on every repeat section and on Attachments (all the same value). */
+function needsSelect(plural = true) {
+  const sel = el("select", { className: "needs", onchange: (e) => { tpl.needs = e.target.value; renderLayout(); } },
+    el("option", { value: "videos", textContent: plural ? "videos" : "video", selected: tpl.needs === "videos" }),
+    el("option", { value: "images", textContent: plural ? "images" : "image", selected: tpl.needs === "images" }));
+  sel.setAttribute("aria-label", plural ? "Attach the videos or the images" : "Repeat for each");
+  return sel;
+}
+
 function sectionLi(sec) {
   const i = tpl.items.indexOf(sec);
-  const needsSel = el("select", { onchange: (e) => { tpl.needs = e.target.value; renderLayout(); } },
-    el("option", { value: "videos", textContent: "video", selected: tpl.needs === "videos" }), el("option", { value: "images", textContent: "image", selected: tpl.needs === "images" }));
-  needsSel.setAttribute("aria-label", "Repeat for each");
+  const needsSel = needsSelect(false);
   const swap = (d) => { [tpl.items[i], tpl.items[i + d]] = [tpl.items[i + d], tpl.items[i]]; renderLayout(); };
   const list = el("ul", { className: "blocks" }, ...sec.repeat.map((x) => blockLi(x, sec.repeat)));
   list.dataset.section = sec.k;
@@ -962,7 +969,7 @@ function blockLi(x, list) {
     f.setAttribute("aria-label", label);
     return f;
   };
-  const field = kind === "attachments" ? el("span", { className: "hint", textContent: `The ${tpl.needs} themselves, attached. Patreon shows them below the post.` })
+  const field = kind === "attachments" ? el("span", { className: "hint" }, "Attaches the ", needsSelect(), " themselves. Patreon shows them below the post.")
     : kind === "paywall" ? el("span", { className: "wall", textContent: "Paid access starts here" })
     : kind === "divider" ? el("div", { className: "ruler" })
     : kind === "button" ? el("div", { className: "btnf" },
