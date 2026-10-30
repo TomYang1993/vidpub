@@ -17,15 +17,16 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { Bunny, HttpError, VIDEO_TYPES } from "../bunny.ts";
 import { PATREON_PROFILE, PUBLISHERS, readPatreonCache, readPatreonOptions, type PatreonOptions, type PostDoc, type Publisher, type Video } from "../publishers.ts";
-import { deleteVideos, download, listCollections, moveVideos, popularity, proposeCleanup, readDeleted, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
+import { allVideos, deleteVideos, download, listCollections, moveVideos, popularity, proposeCleanup, readDeleted, searchVideos, stats, videoDetails, type LibraryHost } from "../library.ts";
 import { deleteTemplate, loadTemplates, saveTemplate } from "../templates.ts";
-import { buildPost, IMAGE_TYPES, loadJob, localVideos, needsBunny, notify, postPath, publishPost, uploadVideos, type Host, type Job, type RunEvent } from "../vidpub.ts";
+import { buildPost, fromBunny, IMAGE_TYPES, loadJob, localVideos, needsBunny, notify, postPath, publishPost, uploadVideos, type BunnyVideo, type Host, type Job, type RunEvent } from "../vidpub.ts";
 
 /** A job as the page sends it: names of files in the picked folder instead of paths. */
 export type Form = {
   template?: string;
   videos?: string[];
   images?: string[];
+  bunny?: BunnyVideo[]; // videos already on Bunny instead of files in the folder
   collection?: string;
   post?: { title: string; text?: string; access?: string | string[]; thumbnail?: string; collection?: string; attachments?: string[]; publishNow?: boolean };
   publish?: string[];
@@ -70,6 +71,7 @@ export function writeJob(dir: string, form: Form, publishers: Record<string, Pub
     template: form.template,
     collection: form.collection?.trim() || undefined,
     videos: form.videos?.length ? form.videos : undefined,
+    bunny: form.bunny?.length ? form.bunny.map((v) => ({ id: v?.id, title: v?.title })) : undefined, // loadJob checks them
     images: form.images?.length ? form.images : undefined,
     post: post && { ...post, title: typeof post.title === "string" ? post.title.trim() : post.title },
     publish: post ? (form.publish ?? []) : undefined,
@@ -159,6 +161,7 @@ export function serve(opts: {
   makeLibrary?: (env: Env) => LibraryHost; // the Library tab's Bunny client
   downloadDir?: string; // where Library downloads go
   deletedLog?: string; // every video deleted from the Library tab, one JSON line each
+  jobsRoot?: string; // folders for jobs made from Bunny videos (they have no folder of files)
   chooseFolder?: () => Promise<string | null>;
   recentFile?: string; // folders picked so far: the only places this server reads
   envFile?: string;
@@ -171,6 +174,7 @@ export function serve(opts: {
     makeLibrary = (env) => new Bunny(env.BUNNY_LIBRARY_ID!, env.BUNNY_API_KEY!),
     downloadDir = join(homedir(), "Downloads"),
     deletedLog = join(homedir(), ".vidpub", "deleted.jsonl"),
+    jobsRoot = join(homedir(), ".vidpub", "jobs"),
     chooseFolder = osascriptFolder,
     recentFile = join(homedir(), ".vidpub", "ui.json"),
     envFile = join(import.meta.dirname, "..", ".env"),
@@ -224,10 +228,11 @@ export function serve(opts: {
         const state = read(`${jobPath}.state.json`) ?? {};
         const raw = extname(jobPath) === ".json" ? read(jobPath) ?? {} : { videos: [jobPath] }; // CLI single-video run
         const paths: string[] = (raw.videos ?? []).map((p: string) => resolve(dir, p.replace(/^~(?=\/)/, homedir())));
+        const fromBunnyCount = Array.isArray(raw.bunny) ? raw.bunny.length : 0; // already on Bunny: nothing to upload
         const mine = queue.findLast((q) => q.jobPath === jobPath);
         return {
           dir, job: basename(jobPath), mtime: statSync(existsSync(`${jobPath}.state.json`) ? `${jobPath}.state.json` : jobPath).mtimeMs,
-          videos: paths.length, uploaded: paths.filter((p) => state.videos?.[p]?.guid).length, images: raw.images?.length ?? 0,
+          videos: paths.length + fromBunnyCount, uploaded: paths.filter((p) => state.videos?.[p]?.guid).length + fromBunnyCount, images: raw.images?.length ?? 0,
           publish: raw.publish ?? [], published: state.published ?? {}, drafts: state.drafts ?? {}, built: existsSync(`${jobPath}.post.json`),
           queued: mine?.state === "queued", running: mine?.state === "running", error: mine?.state === "failed" ? mine.error : undefined,
         };
@@ -332,7 +337,7 @@ export function serve(opts: {
       if (problems.length) throw fail(400, `Not starting:\n${problems.join("\n")}`);
     }
     const env = readEnv();
-    if (needsBunny(job) && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
+    if ((needsBunny(job) || job.bunny.length) && (!env.BUNNY_LIBRARY_ID || !env.BUNNY_API_KEY)) {
       throw fail(400, "Saved job.json. Add your Bunny library ID and API key in Settings, then Start.");
     }
     needLogin(job); // now, not after hours of uploading
@@ -340,7 +345,8 @@ export function serve(opts: {
     const { onEvent, onUpload } = track(cur, job);
     enqueue(cur, {
       upload: async () => {
-        const videos = needsBunny(job) ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : localVideos(job);
+        const videos = job.bunny.length ? await fromBunny(job, makeHost(readEnv(), onUpload))
+          : needsBunny(job) ? await uploadVideos(job, makeHost(readEnv(), onUpload), undefined, onEvent) : localVideos(job);
         if (!job.post) return "videos are ready";
         if (rebuild) rmSync(postPath(job), { force: true }); // drop hand edits the job no longer matches
         buildPost(job, videos);
@@ -348,6 +354,19 @@ export function serve(opts: {
       },
       publish: job.post && job.publish.length ? send(dir, cur) : undefined,
     });
+  }
+
+  /** A job made from Bunny videos: it gets its own folder under jobsRoot (named after the post), then starts as usual. */
+  function startFromBunny(name: unknown, form: Form) {
+    if (!Array.isArray(form?.bunny) || !form.bunny.length) throw fail(400, "pick some videos in the Library first");
+    const slug = String(name ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").slice(0, 60) || "post";
+    const base = join(jobsRoot, `${new Date().toISOString().slice(0, 10)} ${slug}`);
+    let dir = base;
+    for (let i = 2; existsSync(dir); i++) dir = `${base} ${i}`;
+    mkdirSync(dir, { recursive: true });
+    remember(realpathSync(dir)); // a picked folder like any other: Jobs lists it, Open reopens it
+    start(realpathSync(dir), form, false);
+    return realpathSync(dir);
   }
 
   /** Send a built post again (after a failed send). */
@@ -553,6 +572,9 @@ export function serve(opts: {
         const { dir, form, rebuild } = await body(req);
         start(picked(dir), form ?? null, rebuild === true);
         json(res, 200, { ok: true });
+      } else if (route === "POST /api/start-bunny") {
+        const { name, form } = await body(req);
+        json(res, 200, { ok: true, dir: startFromBunny(name, form) });
       } else if (route === "POST /api/cancel") { // only a step that hasn't started: a running one stops with Ctrl+C
         const id = (await body(req)).id;
         const cur = queue.find((q) => q.id === id);
@@ -585,6 +607,11 @@ export function serve(opts: {
       } else if (route === "GET /api/library/videos") {
         const q = url.searchParams;
         json(res, 200, await searchVideos(library(), { search: q.get("search") ?? "", collection: q.get("collection") ?? "", page: Number(q.get("page")) || 1, orderBy: q.get("orderBy") ?? "date" }));
+      } else if (route === "GET /api/library/collection-videos") { // every video in one collection, for a post
+        const id = url.searchParams.get("id") ?? "";
+        const all = (await allVideos(library())).filter((v) => v.collectionId === id);
+        all.sort((a, z) => a.title.localeCompare(z.title, undefined, { numeric: true }));
+        json(res, 200, { videos: all.map((v) => ({ id: v.id, title: v.title, status: v.status, length: v.length, storageSize: v.storageSize })) });
       } else if (route === "GET /api/library/stats") {
         json(res, 200, await stats(library(), 30));
       } else if (route === "GET /api/library/popular") { // starts (or reuses) a ranking; poll until data is fresh

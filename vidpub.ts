@@ -22,6 +22,10 @@ export const MAX_ATTEMPTS = 3; // fresh uploads per video per run; rerunning is 
 const POLL_MS = 30_000;
 const ENCODE_TIMEOUT_MS = 6 * 3600_000; // still not ready or failed after this = stuck, re-upload
 
+/** A video already in the Bunny library: its id (GUID) and title. */
+export type BunnyVideo = { id: string; title: string };
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** A job's post settings: everything in PostDoc except the blocks, which the template builds from `text`. */
 export type PostInput = Omit<PostDoc, "blocks"> & { text?: string };
 export type Job = {
@@ -29,6 +33,7 @@ export type Job = {
   template?: string;
   videos: string[];
   images: string[];
+  bunny: BunnyVideo[]; // videos already on Bunny, used instead of local files (nothing to upload)
   collection?: string; // Bunny collection
   post?: PostInput;
   publish: string[];
@@ -55,7 +60,7 @@ const settled = (s: number | null) => s === null || READY.has(s) || FAILED.has(s
 /** Read and validate a job up front: a typo should fail now, not after hours of uploading. */
 export function loadJob(arg: string, publishers: Record<string, Publisher> = PUBLISHERS): Job {
   const path = resolve(arg);
-  let job: Job = { path, videos: [path], images: [], publish: [] };
+  let job: Job = { path, videos: [path], images: [], bunny: [], publish: [] };
   const problems: string[] = [];
   if (extname(path).toLowerCase() === ".json") {
     const raw = JSON.parse(readFileSync(path, "utf8"));
@@ -64,6 +69,9 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
       if (raw[key] !== undefined && (!Array.isArray(raw[key]) || !raw[key].every((v: unknown) => typeof v === "string"))) {
         throw new Error(`${path}: "${key}" must be a list of file paths`);
       }
+    }
+    if (raw.bunny !== undefined && (!Array.isArray(raw.bunny) || !raw.bunny.every((v: any) => v && typeof v.title === "string" && GUID.test(v.id)))) {
+      throw new Error(`${path}: "bunny" must be a list of { "id": "<Bunny video id>", "title": "..." }`);
     }
     if (raw.post?.content !== undefined) { // replaced by templates
       const text = String(raw.post.content).replace(/\{(links|previews)\}/g, "").trim();
@@ -74,6 +82,7 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
       template: raw.template,
       videos: (raw.videos ?? []).map(at),
       images: (raw.images ?? []).map(at),
+      bunny: Array.isArray(raw.bunny) ? raw.bunny : [],
       collection: raw.collection,
       post: raw.post && { ...raw.post, thumbnail: raw.post.thumbnail && at(raw.post.thumbnail), attachments: (raw.post.attachments ?? []).map(at) },
       publish: raw.publish ?? (raw.post ? ["patreon_manual"] : []),
@@ -83,11 +92,17 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
   const template = typeof job.template === "string" && Object.hasOwn(templates, job.template) ? templates[job.template] : undefined;
   if (job.template && !template) problems.push(`unknown template: ${job.template} (have: ${Object.keys(templates).join(", ")})`);
   if (job.post && !job.template) problems.push(`a post needs a "template": ${Object.keys(templates).join(" or ")}`);
-  if (template && !job[template.needs].length) problems.push(`template ${job.template} needs "${template.needs}"`);
+  const have = template?.needs === "videos" ? job.videos.length + job.bunny.length : template ? job.images.length : 0;
+  if (template && !have) problems.push(`template ${job.template} needs "${template.needs}"`);
+  if (job.bunny.length && job.videos.length) problems.push(`a job uses either local "videos" or "bunny" videos, not both`);
+  if (job.bunny.length && template?.needs === "images") problems.push(`template ${job.template} is for images; "bunny" lists videos`);
+  if (job.bunny.length && template && attaches(template)) problems.push(`template ${job.template} attaches the files themselves, and videos that are only on Bunny have no local file to attach`);
+  if (new Set(job.bunny.map((v) => v.id)).size !== job.bunny.length) problems.push("a Bunny video is listed twice");
   if (template && job.post && freeAccess(job.post.access) && template.blocks.some((b) => "paywall" in b)) {
     problems.push(`template ${job.template} has a paywall, which needs paid access, not "${job.post.access}"`);
   }
   if (!job.template && !job.videos.length) problems.push("no videos");
+  if (!job.template && job.bunny.length) problems.push(`"bunny" videos need a template: they're already uploaded, so the job is the post`);
   for (const i of job.images) {
     if (!IMAGE_TYPES.has(extname(i).toLowerCase())) problems.push(`not an image: ${i}`);
     else if (!existsSync(i)) problems.push(`missing: ${i}`);
@@ -112,12 +127,25 @@ export function loadJob(arg: string, publishers: Record<string, Publisher> = PUB
 
 /** CLI flow: upload (if any videos), build the post doc, publish it. Image-only jobs never touch Bunny. */
 export async function run(job: Job, bunny: Host | undefined, opts: { sleep?: Sleep; publishers?: Record<string, Publisher> } = {}) {
-  if (needsBunny(job) && !bunny) throw new Error("videos need Bunny: set BUNNY_LIBRARY_ID and BUNNY_API_KEY in .env");
-  const videos = needsBunny(job) ? await uploadVideos(job, bunny!, opts.sleep) : localVideos(job);
+  if ((needsBunny(job) || job.bunny.length) && !bunny) throw new Error("videos need Bunny: set BUNNY_LIBRARY_ID and BUNNY_API_KEY in .env");
+  const videos = job.bunny.length ? await fromBunny(job, bunny!) : needsBunny(job) ? await uploadVideos(job, bunny!, opts.sleep) : localVideos(job);
   if (job.post) {
     buildPost(job, videos);
     await publishPost(job, opts.publishers);
   }
+  return videos;
+}
+
+/** A "bunny" job's videos as the template sees them: each must be ready on Bunny; its play link and animated preview
+ *  come from Bunny, like an uploaded video's. */
+export async function fromBunny(job: Job, bunny: Pick<Host, "status" | "playUrl" | "previewUrl">): Promise<Video[]> {
+  const videos: Video[] = [];
+  for (const v of job.bunny) {
+    const s = await bunny.status(v.id);
+    if (!ready(s)) throw new Error(`${v.title}: ${s === null ? "not in the Bunny library anymore" : `not ready on Bunny (status ${s})`}`);
+    videos.push({ title: v.title, url: bunny.playUrl(v.id), preview: await bunny.previewUrl(v.id) });
+  }
+  console.log(`${videos.length} video${videos.length === 1 ? "" : "s"} from the Bunny library`);
   return videos;
 }
 
@@ -140,7 +168,7 @@ export const localVideos = (job: Job): Video[] => job.videos.map((v) => ({ title
 /** Everything the post is built from, the template's layout included. Videos count by Bunny guid, so a re-upload
  *  means a rebuild. */
 const inputsHash = (job: Job, state: State) =>
-  hash([job.template, templateOf(job), job.post, job.images, job.videos.map((v) => state.videos[v]?.guid ?? null)]);
+  hash([job.template, templateOf(job), job.post, job.images, job.videos.map((v) => state.videos[v]?.guid ?? null), job.bunny]);
 
 /**
  * Build <job>.post.json from the template, or keep it if the job hasn't changed (hand edits survive).

@@ -173,6 +173,12 @@ The **Library** tab works on everything in your Bunny Stream library, not just w
   (`brew install ffmpeg`), without re-encoding. A library with token authentication, "Block direct URL file
   access" or an Allowed domains list refuses downloads.
 
+- **Post from videos already on Bunny:** tick videos and press **Post from selected**, or filter by a collection and
+  press **Post from this collection**. New job then lists those videos instead of a folder's (reorder or untick as
+  usual); pick a template, fill in the post, and Start. Nothing is uploaded: each video must be ready on Bunny, and the
+  post gets its play link and animated preview like an uploaded video. The job lives in
+  `~/.vidpub/jobs/<date> <title>/` (job.json lists `"bunny": [{ "id", "title" }]`), shows in Jobs and reopens there.
+  Attachments-only templates can't be used this way: there's no local file to attach.
 - **Clean up:** proposes a batch of videos to delete to save storage: at most N views in the last 30 or 90 days,
   uploaded more than D days ago (new videos haven't had time), up to a batch size; least-viewed first and, among
   equals, biggest first, so each batch frees the most space. Every video shows why it's proposed ("no views in the

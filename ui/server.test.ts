@@ -35,7 +35,7 @@ test("GUI job: saved as a CLI job.json and read back; bad input lists every prob
 
 test("post file shape: paywall, divider, button pass; malformed blocks are refused", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "vidpub-pw-")));
-  const job = { path: join(dir, "job.json"), videos: [], images: [], publish: [] };
+  const job = { path: join(dir, "job.json"), videos: [], images: [], bunny: [], publish: [] };
   const doc = { title: "T", access: "paid", blocks: [{ text: "free" }, { paywall: true }, { divider: true },
     { button: { text: "Play", url: "https://p/1", caption: "a" } }, { image: "https://c/1.webp" }, { link: "https://p/1" }] };
   assert.deepEqual(postProblems(dir, job, doc as never), []);
@@ -50,7 +50,7 @@ test("a downloaded folder can't make Send upload files from elsewhere, or make t
   writeFileSync(elsewhere, "secret");
   writeFileSync(join(dir, "a.png"), "x");
   symlinkSync(elsewhere, join(dir, "link.pdf"));
-  const job = { path: join(dir, "job.json"), videos: [], images: [join(dir, "a.png")], publish: [], post: { title: "t", access: "public", attachments: [join(dir, "link.pdf")] } };
+  const job = { path: join(dir, "job.json"), videos: [], images: [join(dir, "a.png")], bunny: [], publish: [], post: { title: "t", access: "public", attachments: [join(dir, "link.pdf")] } };
   const doc = { title: "t", access: "public", attachments: [elsewhere], blocks: [{ image: join(dir, "a.png") }, { image: "/etc/hosts" }, { image: "https://cdn/x.webp" }] };
   assert.deepEqual(postProblems(dir, job, doc), [join(dir, "link.pdf"), elsewhere, "/etc/hosts"].map((p) => `outside ${dir}: ${p}`));
   symlinkSync(join(dir, "not-yet"), join(dir, "dangling.png"));
@@ -232,6 +232,28 @@ test("cleanup: proposal leaves out videos used in a vidpub post; delete needs th
     assert.deepEqual([ok.deleted, gone], [[old], [old]]);
     const h = await (await get("/api/library/deleted")).json();
     assert.deepEqual([h.count, h.bytes, h.recent[0].title, h.recent[0].reason], [1, 5e9, "old", "no views in the last 90 days"]);
+  } finally {
+    close();
+  }
+});
+
+test("a post from Bunny videos: its own job folder, no uploads, sent like any job, listed in Jobs", async () => {
+  const id = "dddddddd-1111-4111-8111-111111111111";
+  const jobsRoot = join(realpathSync(mkdtempSync(join(tmpdir(), "vidpub-bj-"))), "jobs");
+  const sent: string[] = [];
+  const host = { status: async () => 4, playUrl: (g: string) => `https://play/${g}`, previewUrl: async (g: string) => `https://cdn/${g}/preview.webp` };
+  const { post, get, until, close } = await queueServer([], { patreon_browser: (doc) => (sent.push(doc.title), "https://draft") }, { jobsRoot, makeHost: () => host });
+  try {
+    const form = { template: "video-previews", bunny: [{ id, title: "Old clip" }], post: { title: "Rebuilt", access: "paid" }, publish: ["patreon_browser"] };
+    const r = await (await post("/api/start-bunny", { name: "Rebuilt: part 1", form })).json();
+    assert.match(r.dir, /jobs\/\d{4}-\d{2}-\d{2} rebuilt-part-1$/);
+    await until((q) => q[0]?.state === "done");
+    assert.deepEqual(sent, ["Rebuilt"]);
+    const doc = JSON.parse(readFileSync(join(r.dir, "job.json.post.json"), "utf8")).doc;
+    assert.deepEqual(doc.blocks, [{ image: `https://cdn/${id}/preview.webp` }, { link: `https://play/${id}` }]);
+    const { jobs } = await (await get("/api/jobs")).json();
+    assert.deepEqual(jobs.map((j: { dir: string; videos: number }) => [j.dir, j.videos]), [[r.dir, 1]]);
+    assert.equal((await post("/api/start-bunny", { name: "x", form: { ...form, bunny: [] } })).status, 400);
   } finally {
     close();
   }

@@ -426,3 +426,30 @@ test("an interrupted send records its draft, and the next send finishes that dra
   assert.deepEqual(seen, [undefined, "https://www.patreon.com/posts/42/edit"]); // the second send was handed the draft
   assert.equal(state().published.p, "https://www.patreon.com/posts/42/edit");
 });
+
+test("a job from Bunny videos: no uploads, play links and previews from Bunny; bad lists are refused", async () => {
+  const [a, b] = ["aaaaaaaa", "bbbbbbbb"].map((x) => `${x}-1111-4111-8111-111111111111`);
+  const spec = (extra: object) => ({ template: "video-previews", post: { title: "T", text: "From Bunny", access: "paid" }, publish: ["patreon_manual"], ...extra });
+  const path = job("from-bunny", ["x.txt"], spec({ bunny: [{ id: b, title: "Second" }, { id: a, title: "First" }] }));
+  const bunny = new FakeBunny({});
+  bunny.videos.set(a, 4);
+  bunny.videos.set(b, 4);
+  const rec = recorder();
+  await run(loadJob(path, rec.publishers), bunny as never, { publishers: rec.publishers });
+  assert.equal(bunny.created.length, 0); // nothing uploaded
+  assert.deepEqual(rec.calls[0].blocks, [
+    { text: "From Bunny" },
+    { image: `https://cdn/${b}/preview.webp` }, { link: `https://play/${b}` },
+    { image: `https://cdn/${a}/preview.webp` }, { link: `https://play/${a}` },
+  ]);
+  bunny.videos.set(a, 3); // still encoding
+  writeFileSync(path, JSON.stringify(spec({ bunny: [{ id: a, title: "First" }], post: { title: "T2", access: "paid" } })));
+  await assert.rejects(run(loadJob(path, rec.publishers), bunny as never, { publishers: rec.publishers }), /First: not ready on Bunny \(status 3\)/);
+  const bad = (extra: object) => () => loadJob(job(`bad-bunny-${Math.random()}`, ["v.mp4"], spec(extra)));
+  assert.throws(bad({ bunny: [{ id: "../videos/x", title: "x" }] }), /"bunny" must be a list/);
+  assert.throws(bad({ bunny: [{ id: a, title: "A" }], videos: ["v.mp4"] }), /either local "videos" or "bunny"/);
+  assert.throws(bad({ bunny: [{ id: a, title: "A" }, { id: a, title: "A" }] }), /listed twice/);
+  saveTemplate({ name: "Files only", needs: "videos", blocks: [{ attachments: true }] });
+  assert.throws(bad({ template: "files-only", bunny: [{ id: a, title: "A" }] }), /no local file to attach/);
+  deleteTemplate("files-only");
+});

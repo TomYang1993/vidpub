@@ -198,9 +198,13 @@
 
     <section class="card">
       <h2>Files</h2>
-      <div class="row">
+      <div class="row" id="pick-row">
         <button id="pick">Choose folder…</button>
         <select id="recent" aria-label="Recent folders" hidden></select>
+      </div>
+      <div class="row" id="bunny-src" hidden>
+        <b id="bunny-src-label"></b>
+        <button type="button" id="bunny-src-clear" class="linkish">Use a folder instead</button>
       </div>
       <p class="hint" id="folder"></p>
       <div class="row hint tools" id="tools" hidden>
@@ -343,12 +347,14 @@
         <input type="search" id="lib-search" placeholder="Search titles" aria-label="Search titles" autocomplete="off">
         <select id="lib-coll" aria-label="Collection"></select>
         <select id="lib-order" aria-label="Sort"><option value="date">Newest</option><option value="title">Title</option></select>
+        <button type="button" id="lib-post-coll" hidden>Post from this collection</button>
       </div>
       <div class="row lib-move" id="lib-movebar" hidden>
         <b id="lib-sel"></b> <span>Move to</span>
         <select id="lib-move-to" aria-label="Move to collection"></select>
         <input type="text" id="lib-new" placeholder="New collection name" aria-label="New collection name" hidden>
         <button type="button" id="lib-move">Move</button>
+        <button type="button" id="lib-post" style="margin-left: auto">Post from selected</button>
       </div>
       <table class="lib-table">
         <thead><tr><th><input type="checkbox" id="lib-all" aria-label="Select all on this page"></th><th>Title</th><th>Collection</th>
@@ -549,8 +555,37 @@ $("refresh").onclick = async () => {
   }
 };
 
+// A post made from videos already on Bunny (from the Library tab, or a reopened job of that kind): the Files list
+// shows those videos instead of a folder's; nothing is uploaded. { label, videos: [{ id, title, storageSize? }] }
+let bunnySrc = null;
+function useBunnyVideos(label, videos) {
+  folder = null;
+  bunnySrc = { label, videos };
+  lists.videos = videos.map((v) => ({ id: v.id, name: v.title, size: v.storageSize ?? 0, on: true }));
+  lists.images = [];
+  if (templates.find((t) => t.id === template)?.needs !== "videos") template = "video-previews";
+  for (const id of ["title", "text", "collection"]) $(id).value = "";
+  $("thumbnail").replaceChildren(el("option", { value: "", textContent: "None" }));
+  $("attachments").replaceChildren();
+  $("attachments-box").hidden = true;
+  $("queued-note").hidden = true;
+  $("recent").value = "";
+  showSource();
+  renderTemplates();
+  syncPost();
+  renderItems();
+}
+function showSource() {
+  $("pick-row").hidden = !!bunnySrc && !folder;
+  $("bunny-src").hidden = !bunnySrc;
+  $("bunny-src-label").textContent = bunnySrc ? `From your Bunny library: ${bunnySrc.label} · ${bunnySrc.videos.length} video${bunnySrc.videos.length === 1 ? "" : "s"}` : "";
+  if (bunnySrc && !folder) $("folder").textContent = "Already on Bunny: nothing is uploaded. The post links to them like uploaded videos.";
+}
+$("bunny-src-clear").onclick = () => { bunnySrc = null; lists.videos = []; $("folder").textContent = ""; showSource(); syncPost(); renderItems(); };
+
 function setFolder(f) {
   folder = f;
+  bunnySrc = null;
   $("queued-note").hidden = true;
   const saved = f.job;
   for (const [key, kind] of [["videos", "video"], ["images", "image"]]) {
@@ -570,6 +605,11 @@ function setFolder(f) {
     el("label", { className: "check" }, el("input", { type: "checkbox", value: x.name }), el("span", { textContent: `${x.name} ` }, el("span", { className: "hint", textContent: size(x.size) })))));
   $("attachments-box").hidden = !others.length;
 
+  if (saved?.bunny?.length) { // a job made from Bunny videos, reopened
+    bunnySrc = { label: f.dir.split("/").pop(), videos: saved.bunny };
+    lists.videos = saved.bunny.map((v) => ({ id: v.id, name: v.title, size: 0, on: true }));
+  }
+  showSource();
   if (saved) {
     const p = saved.post;
     if (saved.template) template = saved.template;
@@ -668,7 +708,8 @@ async function openFolder(dir) {
 $("recent").onchange = () => $("recent").value && openFolder($("recent").value).catch((e) => ($("errors").textContent = e.message));
 
 // ---- thumbnail: pick one from the folder, or upload any image (copied into the folder)
-$("thumb-pick").onclick = () => (folder ? $("thumb-file").click() : ($("thumb-status").textContent = "Pick the folder first."));
+$("thumb-pick").onclick = () => (folder ? $("thumb-file").click()
+  : ($("thumb-status").textContent = bunnySrc ? "A post made from Bunny videos has no folder for a thumbnail yet." : "Pick the folder first."));
 $("thumb-file").onchange = async () => {
   const file = $("thumb-file").files[0];
   $("thumb-file").value = "";
@@ -693,7 +734,7 @@ $("thumb-file").onchange = async () => {
 function syncPost() {
   const videos = needs() === "videos";
   const t = templates.find((x) => x.id === template);
-  $("collection-box").hidden = !videos || (!!t && !usesBunny(t)); // nothing goes to Bunny for this template
+  $("collection-box").hidden = !videos || !!bunnySrc || (!!t && !usesBunny(t)); // nothing goes to Bunny for this job
   $("tiers").hidden = $("access").value !== "tiers";
   $("text-box").hidden = !!t && !uses(t, "text");
 }
@@ -704,8 +745,8 @@ function form() {
   const checked = (sel) => [...document.querySelectorAll(sel)].filter((c) => c.checked).map((c) => c.value);
   return {
     template,
-    [kind]: items().filter((v) => v.on).map((v) => v.name),
-    collection: kind === "videos" ? $("collection").value.trim() || undefined : undefined,
+    ...(bunnySrc ? { bunny: items().filter((v) => v.on).map((v) => ({ id: v.id, title: v.name })) } : { [kind]: items().filter((v) => v.on).map((v) => v.name) }),
+    collection: kind === "videos" && !bunnySrc ? $("collection").value.trim() || undefined : undefined,
     post: {
       title: $("title").value.trim(),
       text: $("text").value.trim() || undefined,
@@ -723,19 +764,20 @@ function updateStart() {
   const busy = !!folder && !!active(folder.dir);
   const any = items().some((v) => v.on);
   const now = $("publish-now").checked;
-  $("start").disabled = !folder || busy || !any;
-  const bunny = needs() === "videos" && usesBunny(templates.find((x) => x.id === template));
+  $("start").disabled = (!folder && !bunnySrc) || busy || !any;
+  const bunny = !bunnySrc && needs() === "videos" && usesBunny(templates.find((x) => x.id === template));
   $("start").textContent = `${bunny ? "Upload and " : ""}${now ? "publish on Patreon" : "save as a Patreon draft"}`.replace(/^./, (c) => c.toUpperCase());
-  $("start-hint").textContent = busy ? "Already queued: see Jobs." : !folder ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.` : "";
+  $("start-hint").textContent = busy ? "Already queued: see Jobs." : !folder && !bunnySrc ? "Pick a folder first." : !any ? `Select at least one of the ${needs()}.` : "";
 }
 
 async function start() {
   $("errors").textContent = "";
   $("start").disabled = true;
   try {
-    const name = folder.dir.split("/").pop();
-    if ($("publish-now").checked && !confirm(`Publish ${name} on Patreon as soon as it's uploaded? Members get notified.`)) return;
-    await api("/api/start", { dir: folder.dir, form: form() });
+    const name = folder ? folder.dir.split("/").pop() : $("title").value.trim() || bunnySrc.label;
+    if ($("publish-now").checked && !confirm(`Publish ${name} on Patreon${bunnySrc ? "" : " as soon as it's uploaded"}? Members get notified.`)) return;
+    if (folder) await api("/api/start", { dir: folder.dir, form: form() });
+    else await api("/api/start-bunny", { name, form: form() }); // gets its own job folder
     resetNewJob(`Queued: ${name}.`);
   } catch (e) {
     $("errors").textContent = `Can't start yet:\n${e.message}`;
@@ -748,6 +790,8 @@ $("start").onclick = () => start();
 /** Back to a blank job once one is queued, so the next one can be set up while it runs. */
 function resetNewJob(note) {
   folder = null;
+  bunnySrc = null;
+  showSource();
   lists.videos = [];
   lists.images = [];
   for (const id of ["title", "text", "collection"]) $(id).value = "";
@@ -1179,6 +1223,7 @@ async function loadLibrary() {
     $("lib-coll").replaceChildren(el("option", { value: "", textContent: "All videos" }),
       ...collections.map((c) => el("option", { value: c.id, textContent: `${c.name} (${c.videoCount})` })));
     $("lib-coll").value = sel;
+    $("lib-post-coll").hidden = !$("lib-coll").value;
     renderMoveTargets();
     const views = st.views.map(([, n]) => n), watch = st.watchTime.reduce((a, [, n]) => a + n, 0);
     $("lib-stats").replaceChildren(
@@ -1258,9 +1303,27 @@ $("lib-move").onclick = async () => {
     $("lib-move").disabled = false;
   }
 };
+// Posts from videos already on Bunny: the ticked ones, or a whole collection
+$("lib-post").onclick = () => {
+  const picked = lib.items.filter((v) => lib.selected.has(v.id));
+  useBunnyVideos(`${picked.length} picked in the Library`, picked);
+  show("new");
+};
+$("lib-post-coll").onclick = async () => {
+  const id = $("lib-coll").value;
+  try {
+    const { videos } = await api(`/api/library/collection-videos?id=${encodeURIComponent(id)}`);
+    if (!videos.length) return ($("lib-error").textContent = "That collection has no videos.");
+    useBunnyVideos(collName(id), videos);
+    show("new");
+  } catch (e) {
+    $("lib-error").textContent = e.message;
+  }
+};
 let searchTimer;
 $("lib-search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => searchLibrary(1), 300); };
-$("lib-coll").onchange = $("lib-order").onchange = () => searchLibrary(1);
+$("lib-coll").onchange = () => { $("lib-post-coll").hidden = !$("lib-coll").value; searchLibrary(1); };
+$("lib-order").onchange = () => searchLibrary(1);
 $("lib-prev").onclick = () => searchLibrary(lib.page - 1);
 $("lib-next").onclick = () => searchLibrary(lib.page + 1);
 $("lib-refresh").onclick = () => loadLibrary();
